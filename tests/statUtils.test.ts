@@ -42,9 +42,15 @@ describe("computeFocusStat", () => {
     expect(stat?.dayChange?.percent).toBeCloseTo((1200 / (12000 + 3 * 1200)) * 100);
   });
 
-  it("returns a null dayChange for the first date in the series", () => {
+  it("returns the previous day's own date and ARR value alongside the delta", () => {
+    const stat = computeFocusStat(series, "2026-01-05", "INR");
+    expect(stat?.previousDay).toEqual({ date: "2026-01-04", value: 12000 + 3 * 1200 });
+  });
+
+  it("returns a null dayChange and previousDay for the first date in the series", () => {
     const stat = computeFocusStat(series, "2026-01-01", "INR");
     expect(stat?.dayChange).toBeNull();
+    expect(stat?.previousDay).toBeNull();
   });
 
   it("compares against the average of up to the trailing 7 days including the focused date", () => {
@@ -54,6 +60,7 @@ describe("computeFocusStat", () => {
     const avg = trailing.reduce((a, b) => a + b, 0) / trailing.length;
     const current = 12000 + 7 * 1200;
     expect(stat?.sevenDayAvgChange?.absolute).toBeCloseTo(current - avg);
+    expect(stat?.sevenDayAvg).toBeCloseTo(avg);
   });
 
   it("averages over fewer than 7 days when less history exists", () => {
@@ -63,5 +70,6 @@ describe("computeFocusStat", () => {
     const avg = trailing.reduce((a, b) => a + b, 0) / trailing.length;
     const current = 12000 + 2 * 1200;
     expect(stat?.sevenDayAvgChange?.absolute).toBeCloseTo(current - avg);
+    expect(stat?.sevenDayAvg).toBeCloseTo(avg);
   });
 });

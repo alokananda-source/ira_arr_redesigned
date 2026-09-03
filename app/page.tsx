@@ -26,6 +26,17 @@ export default function DashboardPage() {
   const [mode, setMode] = useState<ChartMode>("day");
   const [range, setRange] = useState<DateRange>({ type: "preset", days: DEFAULT_CHART_RANGE_DAYS });
   const [focusDate, setFocusDate] = useState<string | null>(null);
+  const [focusTimeOfDay, setFocusTimeOfDay] = useState<string | null>(null);
+
+  const handleModeChange = useCallback((nextMode: ChartMode) => {
+    setMode(nextMode);
+    setFocusTimeOfDay(null);
+  }, []);
+
+  const handleFocusDateChange = useCallback((date: string) => {
+    setFocusDate(date);
+    setFocusTimeOfDay(null);
+  }, []);
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -69,6 +80,16 @@ export default function DashboardPage() {
     return computeFocusStat(data.series, effectiveFocusDate, currency);
   }, [data, effectiveFocusDate, currency]);
 
+  // When a specific intraday point is clicked, pin the headline number to that point's ARR
+  // while the day-over-day / 7-day-average comparisons stay anchored to the whole focused day.
+  const panelStat = useMemo(() => {
+    if (!focusStat || mode !== "time" || !focusTimeOfDay) return focusStat;
+    const point = timeOfDayPoints.find((p) => p.timeOfDay === focusTimeOfDay);
+    const current = point ? (currency === "INR" ? point.arrInr : point.arrUsd) : null;
+    if (current === null || current === undefined) return focusStat;
+    return { ...focusStat, current, timeOfDay: focusTimeOfDay };
+  }, [focusStat, mode, focusTimeOfDay, timeOfDayPoints, currency]);
+
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-8">
       <Header
@@ -92,15 +113,20 @@ export default function DashboardPage() {
       ) : data ? (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            <ModeToggle value={mode} onChange={setMode} />
+            <ModeToggle value={mode} onChange={handleModeChange} />
             {mode === "time" && firstDate && latestDate && effectiveFocusDate && (
-              <SingleDatePicker value={effectiveFocusDate} min={firstDate} max={latestDate} onChange={setFocusDate} />
+              <SingleDatePicker
+                value={effectiveFocusDate}
+                min={firstDate}
+                max={latestDate}
+                onChange={handleFocusDateChange}
+              />
             )}
             {mode === "day" && <DateRangePicker value={range} onChange={setRange} />}
           </div>
 
-          {focusStat ? (
-            <StatPanel stat={focusStat} currency={currency} />
+          {panelStat ? (
+            <StatPanel stat={panelStat} currency={currency} />
           ) : (
             <EmptyState message="no data for the selected date yet." />
           )}
@@ -110,7 +136,13 @@ export default function DashboardPage() {
               <EmptyState message="try a different date range, or check back once the sheet has more history." />
             ) : (
               <>
-                <ArrChart mode="day" series={filteredSeries} timeOfDayPoints={[]} currency={currency} />
+                <ArrChart
+                  mode="day"
+                  series={filteredSeries}
+                  timeOfDayPoints={[]}
+                  currency={currency}
+                  onPointClick={handleFocusDateChange}
+                />
                 <DataTable series={filteredSeries} currency={currency} />
               </>
             )
@@ -120,7 +152,13 @@ export default function DashboardPage() {
               message="the 10-minute feed hasn't reported any buckets for this date yet."
             />
           ) : (
-            <ArrChart mode="time" series={[]} timeOfDayPoints={timeOfDayPoints} currency={currency} />
+            <ArrChart
+              mode="time"
+              series={[]}
+              timeOfDayPoints={timeOfDayPoints}
+              currency={currency}
+              onPointClick={setFocusTimeOfDay}
+            />
           )}
         </>
       ) : null}

@@ -38,20 +38,36 @@ export function StatPanel({ stat, currency }: { stat: FocusStat; currency: Curre
 
   return (
     <div className="rounded-3xl border border-ink/10 bg-paper-surface p-6 shadow-sm">
-      <p className="text-sm font-medium text-ink/60">{formatDate(stat.date)}&apos;s ARR</p>
+      <p className="text-sm font-medium text-ink/60">
+        {formatDate(stat.date)}
+        {stat.timeOfDay ? `, ${stat.timeOfDay}` : ""}&apos;s ARR
+      </p>
       <p className="mt-1 text-4xl font-extrabold tabular-nums text-ink">
         {formatCurrencyAbbreviated(stat.current, currency)}
       </p>
 
-      <div className="mt-5 border-t border-ink/10 pt-5">
+      <div className="mt-5 flex items-start justify-between gap-4 border-t border-ink/10 pt-5">
         <BigArrow change={stat.dayChange} currency={currency} />
+        {stat.previousDay && (
+          <div className="shrink-0 text-right">
+            <p className="text-xs text-ink/40">{formatDate(stat.previousDay.date)}</p>
+            <p className="text-lg font-semibold tabular-nums text-ink/70">
+              {formatCurrencyAbbreviated(stat.previousDay.value, currency)}
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="mt-4 flex items-center justify-between border-t border-ink/10 pt-4 text-sm">
         <span className="text-ink/50">vs 7-day average</span>
-        <span className={`font-semibold tabular-nums ${sevenDayColor}`}>
-          {sevenDay ? formatPercent(sevenDay.percent) : "—"}
-        </span>
+        <div className="flex items-center gap-3">
+          {stat.sevenDayAvg !== null && (
+            <span className="tabular-nums text-ink/60">{formatCurrencyAbbreviated(stat.sevenDayAvg, currency)} avg</span>
+          )}
+          <span className={`font-semibold tabular-nums ${sevenDayColor}`}>
+            {sevenDay ? formatPercent(sevenDay.percent) : "—"}
+          </span>
+        </div>
       </div>
     </div>
   );
