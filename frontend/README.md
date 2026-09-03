@@ -68,8 +68,8 @@ npm run dev
 
 ### 4. Deploy to Vercel
 
-Point a Vercel project at this repo (root directory — the app lives at the repo root here), set the
-env vars above in the project settings, and deploy. `/api/data` is marked `force-dynamic` with
+Point a Vercel project at this repo with **Root Directory** set to `ira-dashboard/`, set the env vars
+above in the project settings, and deploy. `/api/data` is marked `force-dynamic` with
 `Cache-Control: no-store`, so every page load fetches the sheet fresh — no ISR, no edge caching.
 
 ## Testing

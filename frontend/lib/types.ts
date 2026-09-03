@@ -19,40 +19,42 @@ export interface ChangeStat {
   percent: number | null;
 }
 
-export interface MetricSnapshot {
-  current: number;
-  /** null when there is no prior-day data point to compare against. */
-  dayChange: ChangeStat | null;
-  /** null when there is no data point 7 days prior to compare against. */
-  weekChange: ChangeStat | null;
-}
-
-export interface DashboardKpis {
-  arr: { inr: MetricSnapshot; usd: MetricSnapshot };
-  mrr: { inr: MetricSnapshot; usd: MetricSnapshot };
-  aov: { inr: MetricSnapshot; usd: MetricSnapshot };
-  activeSubscribers: number;
+export interface Freshness {
   lastUpdated: string; // ISO datetime
   staleDays: number;
   isStale: boolean;
 }
 
-export interface IntradayTrendPoint {
+/** Per-gateway daily ARR, shipped to the client so it can build an intraday curve for any date it picks. */
+export interface GatewayDailyRow {
+  date: string;
+  gateway: string;
+  arrInr: number;
+  arrUsd: number;
+}
+
+/** Per-gateway 10-minute bucket, shipped raw for the same reason. */
+export interface IntradayGatewayRow {
+  timestamp: string; // "YYYY-MM-DD HH:mm"
+  date: string;
+  gateway: string;
+  arrInr: number;
+  arrUsd: number;
+}
+
+export interface TimeOfDayPoint {
   /** "HH:mm", the 10-minute bucket start. */
   timeOfDay: string;
-  /** Today's blended ARR (USD) at this time of day. Null once past "now" — no bucket yet. */
-  todayArrUsd: number | null;
-  /** Average blended ARR (USD) at this time of day across up to the last 3 prior calendar days. */
-  trendArrUsd: number | null;
+  /** Null once past the latest bucket actually recorded for that date. */
+  arrInr: number | null;
+  arrUsd: number | null;
 }
 
-export interface DailyDashboardData {
-  kpis: DashboardKpis;
+export interface DashboardData {
   series: DayMetrics[];
-}
-
-export interface DashboardData extends DailyDashboardData {
-  intradayTrend: IntradayTrendPoint[];
+  freshness: Freshness;
+  dailyRows: GatewayDailyRow[];
+  intradayRows: IntradayGatewayRow[];
 }
 
 export interface ApiError {

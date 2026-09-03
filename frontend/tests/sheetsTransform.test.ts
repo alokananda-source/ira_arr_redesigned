@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
+import { buildDashboardData, buildTimeOfDaySeries, parseDailyRows, parseIntradayRows, toPublicDailyRows, toPublicIntradayRows } from "@/lib/sheetsTransform";
 import { STALE_THRESHOLD_DAYS } from "@/lib/constants";
-import { buildDashboardData, buildIntradayTrend, parseDailyRows, parseIntradayRows } from "@/lib/googleSheets";
 
 /** Builds 8 days (2026-01-01..2026-01-08) of per-gateway daily rows for gateways A and B.
- * mrrInr grows linearly per day so day-over-day and week-over-week math is easy to predict. */
+ * mrrInr grows linearly per day so day-over-day math is easy to predict. */
 function buildDailyFixture(): unknown[][] {
   const rows: unknown[][] = [];
   for (let day = 1; day <= 8; day++) {
@@ -61,12 +61,11 @@ describe("parseIntradayRows", () => {
 });
 
 describe("buildDashboardData", () => {
-  it("returns a zeroed, non-stale result for an empty sheet", () => {
+  it("returns an empty, non-stale result for an empty sheet", () => {
     const result = buildDashboardData([], [], new Date("2026-01-08T12:00:00Z"));
     expect(result.series).toHaveLength(0);
-    expect(result.kpis.arr.inr.current).toBe(0);
-    expect(result.kpis.staleDays).toBe(0);
-    expect(result.kpis.isStale).toBe(false);
+    expect(result.freshness.staleDays).toBe(0);
+    expect(result.freshness.isStale).toBe(false);
   });
 
   it("rolls up gateways per day and computes AOV as total MRR / total subscribers", () => {
@@ -112,23 +111,13 @@ describe("buildDashboardData", () => {
     const last = result.series[result.series.length - 1];
     expect(last?.date).toBe("2026-01-08");
     expect(last?.mrrInr).toBe(liveMrrInr);
-    expect(result.kpis.arr.inr.current).toBe(liveMrrInr * 12);
-    expect(result.kpis.lastUpdated).toBe("2026-01-08T10:00:00");
+    expect(result.freshness.lastUpdated).toBe("2026-01-08T10:00:00");
   });
 
   it("falls back to the daily rollup's last date when no intraday bucket exists", () => {
     const daily = parseDailyRows(buildDailyFixture());
     const result = buildDashboardData(daily, [], new Date("2026-01-08T12:00:00Z"));
-    expect(result.kpis.lastUpdated).toBe("2026-01-08T00:00:00");
-  });
-
-  it("computes week-over-week change against the entry 7 days prior", () => {
-    const daily = parseDailyRows(buildDailyFixture());
-    const result = buildDashboardData(daily, [], new Date("2026-01-08T12:00:00Z"));
-
-    const totalsDay1 = dailyTotalsFor(1);
-    const totalsDay8 = dailyTotalsFor(8);
-    expect(result.kpis.arr.inr.weekChange?.absolute).toBe(totalsDay8.arrInr - totalsDay1.arrInr);
+    expect(result.freshness.lastUpdated).toBe("2026-01-08T00:00:00");
   });
 
   it("flags data as stale once it exceeds the configured threshold", () => {
@@ -137,11 +126,11 @@ describe("buildDashboardData", () => {
     const staleNow = new Date(`2026-01-${String(8 + STALE_THRESHOLD_DAYS + 1).padStart(2, "0")}T12:00:00Z`);
 
     const fresh = buildDashboardData(daily, [], freshNow);
-    expect(fresh.kpis.isStale).toBe(false);
+    expect(fresh.freshness.isStale).toBe(false);
 
     const stale = buildDashboardData(daily, [], staleNow);
-    expect(stale.kpis.isStale).toBe(true);
-    expect(stale.kpis.staleDays).toBe(STALE_THRESHOLD_DAYS + 1);
+    expect(stale.freshness.isStale).toBe(true);
+    expect(stale.freshness.staleDays).toBe(STALE_THRESHOLD_DAYS + 1);
   });
 
   it("returns AOV of 0 rather than dividing by zero when there are no active subscribers", () => {
@@ -152,77 +141,44 @@ describe("buildDashboardData", () => {
   });
 });
 
-describe("buildIntradayTrend", () => {
-  // Gateway A reports intraday every day; gateway B never does (mirrors Cashfree/Paytm in the
-  // real sheet) and always falls back to its flat Sheet 1 daily total for every time-of-day slot.
-  // Day 4 ("today") only has a 00:00 bucket so far — 00:10 hasn't happened yet.
-  const daily = parseDailyRows([
-    ["2026-02-01", "A", 0, 0, 0, 0, 0, 0, 0, 0, 1000, 0, 1000],
-    ["2026-02-01", "B", 0, 0, 0, 0, 0, 0, 0, 0, 200, 0, 200],
-    ["2026-02-02", "B", 0, 0, 0, 0, 0, 0, 0, 0, 210, 0, 210],
-    ["2026-02-03", "B", 0, 0, 0, 0, 0, 0, 0, 0, 220, 0, 220],
-    ["2026-02-04", "B", 0, 0, 0, 0, 0, 0, 0, 0, 230, 0, 230],
-  ]);
-  const intraday = parseIntradayRows([
-    ["2026-02-01 00:00", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 100],
-    ["2026-02-01 00:10", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 110],
-    ["2026-02-02 00:00", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 120],
-    ["2026-02-02 00:10", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 130],
-    ["2026-02-03 00:00", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 140],
-    ["2026-02-03 00:10", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 150],
-    ["2026-02-04 00:00", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 160],
-  ]);
+describe("buildTimeOfDaySeries", () => {
+  // Gateway A reports intraday; gateway B never does (mirrors Cashfree/Paytm in the real sheet)
+  // and always falls back to its flat Sheet 1 daily total for every time-of-day slot.
+  const daily = toPublicDailyRows(
+    parseDailyRows([
+      ["2026-02-01", "A", 0, 0, 0, 0, 0, 0, 0, 0, 1000, 0, 1000],
+      ["2026-02-01", "B", 0, 0, 0, 0, 0, 0, 0, 0, 200, 0, 200],
+    ]),
+  );
+  const intraday = toPublicIntradayRows(
+    parseIntradayRows([
+      ["2026-02-01 00:00", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 100],
+      ["2026-02-01 00:10", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 110],
+    ]),
+  );
 
   it("returns all 144 ten-minute time-of-day slots", () => {
-    const trend = buildIntradayTrend(daily, intraday);
-    expect(trend).toHaveLength(144);
-    expect(trend[0]?.timeOfDay).toBe("00:00");
-    expect(trend[1]?.timeOfDay).toBe("00:10");
-    expect(trend[143]?.timeOfDay).toBe("23:50");
+    const series = buildTimeOfDaySeries(daily, intraday, "2026-02-01");
+    expect(series).toHaveLength(144);
+    expect(series[0]?.timeOfDay).toBe("00:00");
+    expect(series[1]?.timeOfDay).toBe("00:10");
+    expect(series[143]?.timeOfDay).toBe("23:50");
   });
 
-  it("blends today's intraday gateway with the other gateways' flat daily total", () => {
-    const trend = buildIntradayTrend(daily, intraday);
-    expect(trend[0]).toMatchObject({ timeOfDay: "00:00", todayArrUsd: 160 + 230 });
+  it("blends the intraday gateway with the other gateway's flat daily total", () => {
+    const series = buildTimeOfDaySeries(daily, intraday, "2026-02-01");
+    expect(series[0]).toMatchObject({ timeOfDay: "00:00", arrUsd: 100 + 200 });
+    expect(series[1]).toMatchObject({ timeOfDay: "00:10", arrUsd: 110 + 200 });
   });
 
-  it("leaves today's slot null once past the latest bucket actually seen", () => {
-    const trend = buildIntradayTrend(daily, intraday);
-    expect(trend[1]?.todayArrUsd).toBeNull(); // 00:10 hasn't happened yet for 2026-02-04
-    expect(trend[2]?.todayArrUsd).toBeNull(); // 00:20 likewise
+  it("leaves slots null once past the latest bucket actually recorded", () => {
+    const series = buildTimeOfDaySeries(daily, intraday, "2026-02-01");
+    expect(series[2]?.arrUsd).toBeNull();
+    expect(series[2]?.arrInr).toBeNull();
   });
 
-  it("averages the last 3 prior days with intraday coverage at the same time of day", () => {
-    const trend = buildIntradayTrend(daily, intraday);
-    const day1 = 100 + 200;
-    const day2 = 120 + 210;
-    const day3 = 140 + 220;
-    expect(trend[0]?.trendArrUsd).toBeCloseTo((day1 + day2 + day3) / 3);
-
-    const day1b = 110 + 200;
-    const day2b = 130 + 210;
-    const day3b = 150 + 220;
-    expect(trend[1]?.trendArrUsd).toBeCloseTo((day1b + day2b + day3b) / 3);
-  });
-
-  it("returns null for both series once no date has coverage for that slot", () => {
-    const trend = buildIntradayTrend(daily, intraday);
-    expect(trend[2]).toMatchObject({ timeOfDay: "00:20", todayArrUsd: null, trendArrUsd: null });
-  });
-
-  it("returns an empty array when there is no data at all", () => {
-    expect(buildIntradayTrend([], [])).toEqual([]);
-  });
-
-  it("excludes a trend day entirely if it has no intraday rows, rather than flattening it", () => {
-    const dailyOnly = parseDailyRows([
-      ["2026-02-01", "A", 0, 0, 0, 0, 0, 0, 0, 0, 1000, 0, 1000], // no intraday row for this date at all
-      ["2026-02-02", "A", 0, 0, 0, 0, 0, 0, 0, 0, 1200, 0, 1200],
-    ]);
-    const intradayOnlyDay2 = parseIntradayRows([["2026-02-02 00:00", "A", 0, 0, 0, 0, 0, 0, 0, 0, 0, 50]]);
-    const trend = buildIntradayTrend(dailyOnly, intradayOnlyDay2);
-    // 2026-02-01 has no intraday coverage, so it can't contribute to the trend average at all —
-    // there's only one qualifying prior day here, and this is "today" itself so no trend anyway.
-    expect(trend[0]).toMatchObject({ timeOfDay: "00:00", todayArrUsd: 50, trendArrUsd: null });
+  it("returns an all-null series for a date with no intraday coverage at all", () => {
+    const series = buildTimeOfDaySeries(daily, intraday, "2026-03-01");
+    expect(series.every((point) => point.arrUsd === null && point.arrInr === null)).toBe(true);
   });
 });
