@@ -9,6 +9,24 @@ import type { ChartMode } from "./ModeToggle";
 
 const ARR_COLOR = "#1c1a14";
 
+interface DotRenderProps {
+  cx?: number;
+  cy?: number;
+  index?: number;
+  payload?: { x: string; arr: number | null };
+}
+
+// Time-wise mode has a dot every 10 minutes (144/day) — far too dense. Render a dot only on the
+// hour (":00" buckets) so each hour of the day gets one small marker; skip everything else.
+function renderHourDot(props: DotRenderProps) {
+  const { cx, cy, index, payload } = props;
+  const key = `hour-dot-${index ?? 0}`;
+  if (cx == null || cy == null || !payload || payload.arr == null || !payload.x.endsWith(":00")) {
+    return <g key={key} />;
+  }
+  return <circle key={key} cx={cx} cy={cy} r={2.5} fill={ARR_COLOR} />;
+}
+
 function dayWiseData(series: DayMetrics[], currency: Currency) {
   return series.map((entry) => ({ x: entry.date, arr: currency === "INR" ? entry.arrInr : entry.arrUsd }));
 }
@@ -53,7 +71,8 @@ export function ArrChart({
             dataKey="arr"
             stroke={ARR_COLOR}
             strokeWidth={2}
-            dot={false}
+            dot={mode === "day" ? { r: 2.5, fill: ARR_COLOR, strokeWidth: 0 } : renderHourDot}
+            activeDot={{ r: 4, fill: ARR_COLOR }}
             connectNulls={mode === "time"}
           />
         </LineChart>
