@@ -1,7 +1,15 @@
 import { google } from "googleapis";
 
-import { DAILY_SHEET_TAB, INTRADAY_SHEET_TAB } from "./constants";
-import { buildDashboardData, parseDailyRows, parseIntradayRows, toPublicDailyRows, toPublicIntradayRows } from "./sheetsTransform";
+import { DAILY_SHEET_TAB, INTRADAY_SHEET_TAB, MINUTE_SHEET_TAB } from "./constants";
+import {
+  buildDashboardData,
+  parseDailyRows,
+  parseIntradayRows,
+  parseMinuteRows,
+  toPublicDailyRows,
+  toPublicIntradayRows,
+  toPublicMinuteRows,
+} from "./sheetsTransform";
 import type { DashboardData } from "./types";
 
 export class SheetsConfigError extends Error {
@@ -16,7 +24,7 @@ function quoteSheetTab(tabName: string): string {
   return `'${tabName.replace(/'/g, "''")}'`;
 }
 
-async function fetchSheetValues(): Promise<{ daily: unknown[][]; intraday: unknown[][] }> {
+async function fetchSheetValues(): Promise<{ daily: unknown[][]; intraday: unknown[][]; minute: unknown[][] }> {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
@@ -42,6 +50,7 @@ async function fetchSheetValues(): Promise<{ daily: unknown[][]; intraday: unkno
       ranges: [
         `${quoteSheetTab(DAILY_SHEET_TAB)}!A2:M`,
         `${quoteSheetTab(INTRADAY_SHEET_TAB)}!A2:L`,
+        `${quoteSheetTab(MINUTE_SHEET_TAB)}!A2:M`,
       ],
       valueRenderOption: "UNFORMATTED_VALUE",
       dateTimeRenderOption: "FORMATTED_STRING",
@@ -51,22 +60,25 @@ async function fetchSheetValues(): Promise<{ daily: unknown[][]; intraday: unkno
     throw new SheetsFetchError(message);
   }
 
-  const [dailyRange, intradayRange] = response.data.valueRanges ?? [];
+  const [dailyRange, intradayRange, minuteRange] = response.data.valueRanges ?? [];
   return {
     daily: (dailyRange?.values ?? []) as unknown[][],
     intraday: (intradayRange?.values ?? []) as unknown[][],
+    minute: (minuteRange?.values ?? []) as unknown[][],
   };
 }
 
 export async function fetchDashboardData(): Promise<DashboardData> {
-  const { daily, intraday } = await fetchSheetValues();
+  const { daily, intraday, minute } = await fetchSheetValues();
   const dailyRows = parseDailyRows(daily);
   const intradayRows = parseIntradayRows(intraday);
-  const { series, freshness } = buildDashboardData(dailyRows, intradayRows);
+  const minuteRows = parseMinuteRows(minute);
+  const { series, freshness } = buildDashboardData(dailyRows, intradayRows, minuteRows);
   return {
     series,
     freshness,
     dailyRows: toPublicDailyRows(dailyRows),
     intradayRows: toPublicIntradayRows(intradayRows),
+    minuteRows: toPublicMinuteRows(minuteRows),
   };
 }

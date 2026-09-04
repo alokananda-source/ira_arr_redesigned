@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildDashboardData, buildTimeOfDaySeries, parseDailyRows, parseIntradayRows, toPublicDailyRows, toPublicIntradayRows } from "@/lib/sheetsTransform";
+import { buildDashboardData, buildTimeOfDaySeries, parseDailyRows, parseIntradayRows, parseMinuteRows, toPublicDailyRows, toPublicIntradayRows } from "@/lib/sheetsTransform";
 import { STALE_THRESHOLD_DAYS } from "@/lib/constants";
 
 /** Builds 8 days (2026-01-01..2026-01-08) of per-gateway daily rows for gateways A and B.
@@ -62,7 +62,7 @@ describe("parseIntradayRows", () => {
 
 describe("buildDashboardData", () => {
   it("returns an empty, non-stale result for an empty sheet", () => {
-    const result = buildDashboardData([], [], new Date("2026-01-08T12:00:00Z"));
+    const result = buildDashboardData([], [], [], new Date("2026-01-08T12:00:00Z"));
     expect(result.series).toHaveLength(0);
     expect(result.freshness.staleDays).toBe(0);
     expect(result.freshness.isStale).toBe(false);
@@ -70,7 +70,7 @@ describe("buildDashboardData", () => {
 
   it("rolls up gateways per day and computes AOV as total MRR / total subscribers", () => {
     const daily = parseDailyRows(buildDailyFixture());
-    const result = buildDashboardData(daily, [], new Date("2026-01-08T12:00:00Z"));
+    const result = buildDashboardData(daily, [], [], new Date("2026-01-08T12:00:00Z"));
 
     expect(result.series).toHaveLength(8);
     const day3 = result.series[2];
@@ -82,7 +82,7 @@ describe("buildDashboardData", () => {
 
   it("computes day-over-day ARR % change against the previous calendar day", () => {
     const daily = parseDailyRows(buildDailyFixture());
-    const result = buildDashboardData(daily, [], new Date("2026-01-08T12:00:00Z"));
+    const result = buildDashboardData(daily, [], [], new Date("2026-01-08T12:00:00Z"));
 
     const day2 = result.series[1] as NonNullable<(typeof result.series)[number]>;
     const totalsDay1 = dailyTotalsFor(1);
@@ -93,7 +93,7 @@ describe("buildDashboardData", () => {
 
   it("has no day-over-day change for the very first day in the series", () => {
     const daily = parseDailyRows(buildDailyFixture());
-    const result = buildDashboardData(daily, [], new Date("2026-01-08T12:00:00Z"));
+    const result = buildDashboardData(daily, [], [], new Date("2026-01-08T12:00:00Z"));
     expect(result.series[0]?.dodArrChangePctInr).toBeNull();
   });
 
@@ -104,7 +104,7 @@ describe("buildDashboardData", () => {
       ["2026-01-08 09:00", "A", 1, 1, 10, 10, 15, 70, 1200, 14400, 13.3, 160],
       ["2026-01-08 10:00", "A", 1, 1, 10, 20, 16, 71, 1300, 15600, 14.4, 173.3],
     ]);
-    const result = buildDashboardData(daily, intraday, new Date("2026-01-08T12:00:00Z"));
+    const result = buildDashboardData(daily, intraday, [], new Date("2026-01-08T12:00:00Z"));
 
     const dailyBTotalsDay8 = 500 + 8 * 5; // gateway B keeps its Sheet 1 value (no intraday feed)
     const liveMrrInr = 1300 + dailyBTotalsDay8;
@@ -114,9 +114,40 @@ describe("buildDashboardData", () => {
     expect(result.freshness.lastUpdated).toBe("2026-01-08T10:00:00");
   });
 
+  it("prefers Minute3Gateway's latest row over the Intraday10min blend when it's fresher", () => {
+    const daily = parseDailyRows(buildDailyFixture());
+    const intraday = parseIntradayRows([
+      ["2026-01-08 09:00", "A", 1, 1, 10, 10, 15, 70, 1200, 14400, 13.3, 160],
+    ]);
+    // Minute3Gateway is already combined across every gateway and one minute fresher.
+    const minute = parseMinuteRows([
+      ["2026-01-08 09:01", 1, 1, 10, 10, 31, 0, 0, 71, 2201, 26412, 24.5, 293.5],
+    ]);
+    const result = buildDashboardData(daily, intraday, minute, new Date("2026-01-08T12:00:00Z"));
+
+    const last = result.series[result.series.length - 1];
+    expect(last?.mrrInr).toBe(2201); // the combined minute row's own figure, not re-summed with anything else
+    expect(result.freshness.lastUpdated).toBe("2026-01-08T09:01:00");
+  });
+
+  it("falls back to the Intraday10min blend when Minute3Gateway has no row for the latest date", () => {
+    const daily = parseDailyRows(buildDailyFixture());
+    const intraday = parseIntradayRows([
+      ["2026-01-08 09:00", "A", 1, 1, 10, 10, 15, 70, 1200, 14400, 13.3, 160],
+    ]);
+    const minute = parseMinuteRows([
+      ["2026-01-07 09:01", 1, 1, 10, 10, 31, 0, 0, 71, 2201, 26412, 24.5, 293.5],
+    ]);
+    const result = buildDashboardData(daily, intraday, minute, new Date("2026-01-08T12:00:00Z"));
+
+    const last = result.series[result.series.length - 1];
+    expect(result.freshness.lastUpdated).toBe("2026-01-08T09:00:00");
+    expect(last?.mrrInr).toBe(1200 + (500 + 8 * 5));
+  });
+
   it("falls back to the daily rollup's last date when no intraday bucket exists", () => {
     const daily = parseDailyRows(buildDailyFixture());
-    const result = buildDashboardData(daily, [], new Date("2026-01-08T12:00:00Z"));
+    const result = buildDashboardData(daily, [], [], new Date("2026-01-08T12:00:00Z"));
     expect(result.freshness.lastUpdated).toBe("2026-01-08T00:00:00");
   });
 
@@ -125,17 +156,17 @@ describe("buildDashboardData", () => {
     const freshNow = new Date("2026-01-08T12:00:00Z");
     const staleNow = new Date(`2026-01-${String(8 + STALE_THRESHOLD_DAYS + 1).padStart(2, "0")}T12:00:00Z`);
 
-    const fresh = buildDashboardData(daily, [], freshNow);
+    const fresh = buildDashboardData(daily, [], [], freshNow);
     expect(fresh.freshness.isStale).toBe(false);
 
-    const stale = buildDashboardData(daily, [], staleNow);
+    const stale = buildDashboardData(daily, [], [], staleNow);
     expect(stale.freshness.isStale).toBe(true);
     expect(stale.freshness.staleDays).toBe(STALE_THRESHOLD_DAYS + 1);
   });
 
   it("returns AOV of 0 rather than dividing by zero when there are no active subscribers", () => {
     const daily = parseDailyRows([["2026-01-01", "Razorpay", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]);
-    const result = buildDashboardData(daily, [], new Date("2026-01-01T12:00:00Z"));
+    const result = buildDashboardData(daily, [], [], new Date("2026-01-01T12:00:00Z"));
     expect(result.series[0]?.aovInr).toBe(0);
     expect(result.series[0]?.aovUsd).toBe(0);
   });

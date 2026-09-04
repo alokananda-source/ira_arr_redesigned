@@ -42,6 +42,14 @@ export interface IntradayGatewayRow {
   arrUsd: number;
 }
 
+/** Minute3Gateway row — all gateways already combined, one per real minute. */
+export interface MinuteRow {
+  timestamp: string; // "YYYY-MM-DD HH:mm"
+  date: string;
+  arrInr: number;
+  arrUsd: number;
+}
+
 export interface TimeOfDayPoint {
   /** "HH:mm", the 10-minute bucket start. */
   timeOfDay: string;
@@ -55,6 +63,7 @@ export interface DashboardData {
   freshness: Freshness;
   dailyRows: GatewayDailyRow[];
   intradayRows: IntradayGatewayRow[];
+  minuteRows: MinuteRow[];
 }
 
 export interface ApiError {

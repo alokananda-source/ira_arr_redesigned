@@ -167,6 +167,26 @@
     color: var(--surface);
   }
 
+  .refresh-btn {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 999px;
+    color: var(--ink-muted);
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+  .refresh-btn:hover { color: var(--ink); border-color: var(--ink-muted); }
+  .refresh-btn:disabled { cursor: default; opacity: 0.55; }
+  .refresh-btn svg { width: 14px; height: 14px; }
+  .refresh-btn.is-spinning svg { animation: spin 0.6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   .compare-grid {
     flex: 1 1 320px;
     display: flex;
@@ -401,6 +421,11 @@
         <span>live</span>
         <span id="asOf"></span>
       </div>
+      <button type="button" class="refresh-btn" id="refreshBtn" title="Refresh now" aria-label="Refresh now">
+        <svg viewBox="0 0 16 16" fill="none">
+          <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.87M13.5 2.5v3.4h-3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
     </div>
   </div>
 
@@ -655,7 +680,38 @@
   let dailySeries = [];
   let rawDailyRows = [];
   let rawIntradayRows = [];
+  let rawMinuteRows = [];
   let freshness = { lastUpdated: null };
+
+  // Minute3Gateway is already combined across gateways, one real row per minute — no blending,
+  // just a direct as-of lookup / window average. This is what actually makes "vs 1 minute ago"
+  // accurate; the old per-gateway blend below only had 10-minute resolution to work with.
+  function minuteArrAt(minuteRows, date, targetMs) {
+    let best = null;
+    let bestMs = -Infinity;
+    for (const r of minuteRows) {
+      if (r.date !== date) continue;
+      const t = parseTs(r.timestamp).getTime();
+      if (t <= targetMs && t > bestMs) {
+        best = r;
+        bestMs = t;
+      }
+    }
+    return best ? { arrInr: best.arrInr, arrUsd: best.arrUsd } : null;
+  }
+
+  function minuteAverageInWindow(minuteRows, date, fromMs, toMs) {
+    const points = minuteRows.filter((r) => {
+      if (r.date !== date) return false;
+      const t = parseTs(r.timestamp).getTime();
+      return t >= fromMs && t <= toMs;
+    });
+    if (points.length === 0) return null;
+    return {
+      arrInr: points.reduce((a, p) => a + p.arrInr, 0) / points.length,
+      arrUsd: points.reduce((a, p) => a + p.arrUsd, 0) / points.length,
+    };
+  }
 
   function latestPoint() {
     const last = dailySeries[dailySeries.length - 1];
@@ -667,8 +723,12 @@
       label: () => "vs 1 minute ago",
       reference() {
         const latestDate = dailySeries[dailySeries.length - 1].date;
-        if (!rawIntradayRows.some((r) => r.date === latestDate)) return null;
         const nowMs = parseTs(latestPoint().timestamp).getTime();
+        if (rawMinuteRows.some((r) => r.date === latestDate)) {
+          return minuteArrAt(rawMinuteRows, latestDate, nowMs - 60 * 1000);
+        }
+        // Minute3Gateway hasn't reported for this date yet — fall back to the coarser 10-min blend.
+        if (!rawIntradayRows.some((r) => r.date === latestDate)) return null;
         return blendedArrAt(rawDailyRows, rawIntradayRows, latestDate, nowMs - 60 * 1000);
       },
     },
@@ -677,6 +737,9 @@
       reference() {
         const latestDate = dailySeries[dailySeries.length - 1].date;
         const nowMs = parseTs(latestPoint().timestamp).getTime();
+        if (rawMinuteRows.some((r) => r.date === latestDate)) {
+          return minuteAverageInWindow(rawMinuteRows, latestDate, nowMs - 15 * 60 * 1000, nowMs);
+        }
         return blendedAverageInWindow(rawDailyRows, rawIntradayRows, latestDate, nowMs - 15 * 60 * 1000, nowMs);
       },
     },
@@ -957,6 +1020,7 @@
     freshness = body.data.freshness;
     rawDailyRows = body.data.dailyRows;
     rawIntradayRows = body.data.intradayRows;
+    rawMinuteRows = body.data.minuteRows;
 
     if (dailySeries.length === 0) {
       showStatus("Connected, but the sheet has no rows yet.", true);
@@ -983,7 +1047,26 @@
     }
   }
 
+  const refreshBtn = document.getElementById("refreshBtn");
+  let pollTimer = null;
+  function schedulePoll() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(loadData, 60000);
+  }
+  refreshBtn.addEventListener("click", async () => {
+    if (refreshBtn.disabled) return;
+    refreshBtn.disabled = true;
+    refreshBtn.classList.add("is-spinning");
+    try {
+      await loadData();
+    } finally {
+      refreshBtn.disabled = false;
+      refreshBtn.classList.remove("is-spinning");
+      schedulePoll(); // manual refresh resets the 60s timer so it doesn't fire again immediately after
+    }
+  });
+
   showStatus("Loading live data…", false);
   loadData();
-  setInterval(loadData, 60000);
+  schedulePoll();
 </script>

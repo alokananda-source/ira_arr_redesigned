@@ -1,5 +1,7 @@
 export const DAILY_SHEET_TAB = process.env.GOOGLE_SHEET_DAILY_TAB || "Sheet 1";
 export const INTRADAY_SHEET_TAB = process.env.GOOGLE_SHEET_INTRADAY_TAB || "Intraday10min";
+// 1-minute, all-gateways-combined tab — the freshest source, updated every minute by sync_arr.py.
+export const MINUTE_SHEET_TAB = process.env.GOOGLE_SHEET_MINUTE_TAB || "Minute3Gateway";
 
 export const STALE_THRESHOLD_DAYS = Number(process.env.STALE_THRESHOLD_DAYS || 2);
 

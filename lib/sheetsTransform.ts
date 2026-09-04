@@ -11,6 +11,7 @@ import type {
   Freshness,
   GatewayDailyRow as PublicGatewayDailyRow,
   IntradayGatewayRow as PublicIntradayGatewayRow,
+  MinuteRow as PublicMinuteRow,
   TimeOfDayPoint,
 } from "./types";
 
@@ -32,6 +33,12 @@ interface IntradayBucketRow extends GatewayDayTotals {
   timestamp: string;
   date: string;
   gateway: string;
+}
+
+/** Minute3Gateway rows are already summed across all gateways — no per-gateway blend needed. */
+interface MinuteRow extends GatewayDayTotals {
+  timestamp: string;
+  date: string;
 }
 
 function num(value: unknown): number {
@@ -87,6 +94,25 @@ export function parseIntradayRows(rows: unknown[][]): IntradayBucketRow[] {
   return parsed;
 }
 
+export function parseMinuteRows(rows: unknown[][]): MinuteRow[] {
+  const parsed: MinuteRow[] = [];
+  for (const row of rows) {
+    const timestamp = str(row[0]);
+    const date = toDateOnly(timestamp);
+    if (!date) continue;
+    parsed.push({
+      timestamp,
+      date,
+      mrrInr: num(row[9]),
+      activeSubscribers: num(row[5]),
+      arrInr: num(row[10]),
+      mrrUsd: num(row[11]),
+      arrUsd: num(row[12]),
+    });
+  }
+  return parsed;
+}
+
 function emptyTotals(): GatewayDayTotals {
   return { mrrInr: 0, arrInr: 0, activeSubscribers: 0, mrrUsd: 0, arrUsd: 0 };
 }
@@ -106,13 +132,18 @@ function aov(mrr: number, subscribers: number): number {
 }
 
 /**
- * Rolls up per-gateway daily rows by date, then overrides the most recent day's totals with
- * whichever gateways have a same-day Intraday10min bucket (only Razorpay reports intraday today,
- * so Cashfree/Paytm keep their Sheet 1 value while Razorpay gets the freshest 10-minute figure).
+ * Rolls up per-gateway daily rows by date, then overrides the most recent day's totals with the
+ * freshest live figure available, in order of preference:
+ *   1. Minute3Gateway's latest same-day row — already summed across every gateway, updated every
+ *      minute, so this is what makes the live number actually move minute to minute.
+ *   2. Falling back to whichever gateways have a same-day Intraday10min (10-minute) bucket, for
+ *      gateways/periods Minute3Gateway hasn't covered.
+ *   3. Falling back further to that gateway's flat Sheet 1 daily total.
  */
 export function buildDashboardData(
   dailyRows: GatewayDailyRow[],
   intradayRows: IntradayBucketRow[],
+  minuteRows: MinuteRow[] = [],
   now: Date = new Date(),
 ): { series: DayMetrics[]; freshness: Freshness } {
   const byDate = new Map<string, GatewayDayTotals>();
@@ -157,6 +188,20 @@ export function buildDashboardData(
       const daily = dailyRowByDateGateway.get(`${lastDate}|${gateway}`);
       if (daily) liveTotals = addTotals(liveTotals, daily);
     }
+  }
+
+  // Minute3Gateway is already summed across every gateway and updates every minute — prefer its
+  // latest same-day row outright whenever it's fresher than what the Intraday10min blend gave us,
+  // rather than trying to merge the two (mixing "some gateways from a combined minute row, others
+  // from their own 10-minute bucket" would double count).
+  let latestMinuteRow: MinuteRow | null = null;
+  for (const row of minuteRows) {
+    if (row.date !== lastDate) continue;
+    if (!latestMinuteRow || row.timestamp > latestMinuteRow.timestamp) latestMinuteRow = row;
+  }
+  if (latestMinuteRow && (!latestIntradayTimestamp || latestMinuteRow.timestamp > latestIntradayTimestamp)) {
+    liveTotals = latestMinuteRow;
+    latestIntradayTimestamp = latestMinuteRow.timestamp;
   }
 
   // Build the full series, swapping the last day's rolled-up totals for the live-blended figure.
@@ -276,6 +321,15 @@ export function toPublicIntradayRows(rows: IntradayBucketRow[]): PublicIntradayG
     timestamp: row.timestamp,
     date: row.date,
     gateway: row.gateway,
+    arrInr: row.arrInr,
+    arrUsd: row.arrUsd,
+  }));
+}
+
+export function toPublicMinuteRows(rows: MinuteRow[]): PublicMinuteRow[] {
+  return rows.map((row) => ({
+    timestamp: row.timestamp,
+    date: row.date,
     arrInr: row.arrInr,
     arrUsd: row.arrUsd,
   }));
