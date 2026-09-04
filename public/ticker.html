@@ -1,0 +1,989 @@
+<title>IRA ARR Ticker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f2ecda;
+    --surface: #faf7ec;
+    --ink: #1c1a14;
+    --ink-muted: rgba(28, 26, 20, 0.55);
+    --ink-faint: rgba(28, 26, 20, 0.13);
+    --border: rgba(28, 26, 20, 0.10);
+    --positive: #3f6b3f;
+    --positive-soft: rgba(63, 107, 63, 0.12);
+    --negative: #a8402f;
+    --negative-soft: rgba(168, 64, 47, 0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16140f;
+      --surface: #1f1c15;
+      --ink: #f2ecda;
+      --ink-muted: rgba(242, 236, 218, 0.58);
+      --ink-faint: rgba(242, 236, 218, 0.14);
+      --border: rgba(242, 236, 218, 0.12);
+      --positive: #6ca66c;
+      --positive-soft: rgba(108, 166, 108, 0.16);
+      --negative: #d17a63;
+      --negative-soft: rgba(209, 122, 99, 0.16);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16140f;
+    --surface: #1f1c15;
+    --ink: #f2ecda;
+    --ink-muted: rgba(242, 236, 218, 0.58);
+    --ink-faint: rgba(242, 236, 218, 0.14);
+    --border: rgba(242, 236, 218, 0.12);
+    --positive: #6ca66c;
+    --positive-soft: rgba(108, 166, 108, 0.16);
+    --negative: #d17a63;
+    --negative-soft: rgba(209, 122, 99, 0.16);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background-color: var(--bg);
+    background-image: radial-gradient(circle, var(--ink-faint) 1px, transparent 1px);
+    background-size: 22px 22px;
+    color: var(--ink);
+    font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 32px 20px 56px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .dashboard-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  /* header */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .brand-name { font-weight: 800; font-size: 21px; letter-spacing: -0.01em; }
+  .brand-sub { font-size: 14px; color: var(--ink-muted); }
+  .live-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--ink-muted);
+  }
+  .live-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--positive);
+    box-shadow: 0 0 0 0 var(--positive-soft);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(63,107,63,0.45); }
+    70% { box-shadow: 0 0 0 6px rgba(63,107,63,0); }
+    100% { box-shadow: 0 0 0 0 rgba(63,107,63,0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot { animation: none; }
+  }
+
+  /* ticker bar: current ARR + all three comparisons in one horizontal row */
+  .ticker-bar {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 28px;
+    padding: 22px 26px;
+    box-shadow: 0 1px 2px rgba(28,26,20,0.04);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 22px;
+  }
+  .ticker-current { flex: 0 1 auto; min-width: 160px; }
+  .hero-label {
+    font-size: 12px;
+    color: var(--ink-muted);
+    font-weight: 600;
+  }
+  .hero-number {
+    margin-top: 4px;
+    font-size: clamp(30px, 7vw, 46px);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    white-space: nowrap;
+    transition: color 0.4s ease;
+  }
+  .hero-number.flash-up { color: var(--positive); }
+  .hero-number.flash-down { color: var(--negative); }
+  .hero-updated { margin-top: 4px; font-size: 11px; color: var(--ink-muted); font-weight: 500; white-space: nowrap; }
+  .ticker-divider { width: 1px; align-self: stretch; background: var(--border); flex: 0 0 auto; }
+  @media (max-width: 700px) {
+    .ticker-divider { display: none; }
+    .compare-grid { margin-top: 4px; padding-top: 14px; border-top: 1px solid var(--border); }
+  }
+
+  .topbar-right { display: flex; align-items: center; gap: 14px; }
+  .currency-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 999px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .currency-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--ink-muted);
+    font: inherit;
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    padding: 5px 13px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .currency-btn[aria-pressed="true"] {
+    background: var(--ink);
+    color: var(--surface);
+  }
+
+  .compare-grid {
+    flex: 1 1 320px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 28px;
+  }
+  .compare-card { flex: 1 1 150px; min-width: 130px; display: flex; flex-direction: column; gap: 6px; }
+  .compare-window {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-muted);
+  }
+  .compare-icon { width: 13px; height: 13px; flex-shrink: 0; color: var(--ink-muted); }
+  .compare-row { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+  .compare-arrow { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px; }
+  .compare-figures { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .compare-delta {
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1.25;
+  }
+  .compare-percent {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.2;
+  }
+  .compare-caption {
+    font-size: 10.5px;
+    color: var(--ink-muted);
+    font-weight: 600;
+    line-height: 1.25;
+  }
+  .compare-card.is-positive .compare-delta,
+  .compare-card.is-positive .compare-percent { color: var(--positive); }
+  .compare-card.is-negative .compare-delta,
+  .compare-card.is-negative .compare-percent { color: var(--negative); }
+  .compare-card.is-flat .compare-delta,
+  .compare-card.is-flat .compare-percent { color: var(--ink-muted); }
+
+  /* chart card */
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 28px;
+    padding: 22px 22px 12px;
+  }
+  .chart-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px 16px;
+    margin-bottom: 6px;
+  }
+  .chart-title { font-size: 13px; font-weight: 700; color: var(--ink); letter-spacing: 0.01em; white-space: nowrap; }
+  .chart-range { font-size: 12px; color: var(--ink-muted); margin-bottom: 10px; }
+  .chart-canvas-holder { position: relative; height: 340px; }
+  .chart-canvas-holder svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .chart-canvas-holder text { font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif; }
+
+  .range-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 999px;
+    padding: 3px;
+    gap: 2px;
+  }
+  .range-btn {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--ink-muted);
+    font: inherit;
+    font-weight: 700;
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    padding: 5px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .range-btn[aria-pressed="true"] {
+    background: var(--ink);
+    color: var(--surface);
+  }
+
+  .chart-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .custom-range {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    border-radius: 999px;
+    padding: 4px 10px;
+  }
+  .custom-range input[type="date"] {
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 1px 0;
+    outline: none;
+    color-scheme: light dark;
+  }
+  .custom-range .sep { color: var(--ink-muted); font-size: 11px; }
+
+  .chart-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 10px;
+    font-size: 12px;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(28,26,20,0.08);
+    transform: translate(-50%, -112%);
+  }
+  .chart-tooltip .tt-date { color: var(--ink-muted); font-weight: 600; margin-bottom: 2px; }
+  .chart-tooltip .tt-value { color: var(--ink); font-weight: 800; font-variant-numeric: tabular-nums; }
+
+  .foot-note {
+    font-size: 12px;
+    color: var(--ink-muted);
+    text-align: center;
+  }
+
+  .status-banner {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--ink-muted);
+    border-radius: 14px;
+    padding: 10px 16px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .status-banner.is-error {
+    border-color: var(--negative);
+    color: var(--negative);
+    background: var(--negative-soft);
+  }
+
+  /* Wide-screen / TV-wall layout: fills the viewport, no scrolling, everything
+     legible from across a room. Placed last so it wins the cascade over the
+     base (mobile) rules above at this width. */
+  @media (min-width: 980px) {
+    html, body { height: 100%; }
+    body { overflow: hidden; }
+    .wrap {
+      max-width: none;
+      width: 100%;
+      height: 100vh;
+      box-sizing: border-box;
+      padding: 2.2vh 2.2vw;
+      gap: 1.4vh;
+      overflow: hidden;
+    }
+    .topbar { flex: 0 0 auto; }
+    .status-banner { flex: 0 0 auto; }
+    .brand-name { font-size: clamp(22px, 1.9vw, 32px); }
+    .brand-sub { font-size: clamp(14px, 1.2vw, 18px); }
+    .currency-btn { font-size: clamp(12px, 0.9vw, 15px); padding: 7px 16px; }
+    .live-status { font-size: clamp(12px, 0.9vw, 15px); }
+    .live-dot { width: 10px; height: 10px; }
+
+    .dashboard-grid {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1.6vh;
+    }
+
+    .ticker-bar {
+      flex: 0 0 auto;
+      padding: 2.6vh 2.2vw;
+      gap: 3vw;
+    }
+    .ticker-current { min-width: 200px; }
+    .hero-label { font-size: clamp(14px, 1vw, 17px); }
+    .hero-number { font-size: clamp(40px, 4.6vw, 76px); }
+    .hero-updated { font-size: clamp(12px, 0.85vw, 15px); margin-top: 8px; }
+
+    .compare-grid { gap: 2vh 3vw; }
+    .compare-window { font-size: clamp(12px, 0.85vw, 15px); }
+    .compare-icon { width: clamp(13px, 1vw, 16px); height: clamp(13px, 1vw, 16px); }
+    .compare-arrow { width: clamp(22px, 1.8vw, 30px); height: clamp(22px, 1.8vw, 30px); }
+    .compare-delta { font-size: clamp(17px, 1.6vw, 26px); }
+    .compare-percent { font-size: clamp(14px, 1.2vw, 20px); }
+    .compare-caption { font-size: clamp(12px, 0.85vw, 15px); }
+
+    .chart-card {
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 2.4vh 2.2vw 1.6vh;
+    }
+    .chart-title { font-size: clamp(16px, 1.2vw, 22px); }
+    .chart-range { font-size: clamp(13px, 1vw, 16px); }
+    .range-btn, .custom-range input[type="date"] { font-size: clamp(12px, 0.9vw, 15px); }
+    .chart-canvas-holder { flex: 1 1 auto; height: auto; min-height: 0; }
+    .chart-canvas-holder text { font-size: clamp(11px, 0.85vw, 14px) !important; }
+    .chart-tooltip { font-size: clamp(12px, 0.9vw, 15px); }
+
+    .foot-note { flex: 0 0 auto; font-size: 11px; opacity: 0.55; }
+  }
+</style>
+
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">
+      <span class="brand-name">ira</span>
+      <span class="brand-sub">arr ticker</span>
+    </div>
+    <div class="topbar-right">
+      <div class="currency-toggle" role="group" aria-label="currency">
+        <button class="currency-btn" data-currency="INR" aria-pressed="false">INR</button>
+        <button class="currency-btn" data-currency="USD" aria-pressed="true">USD</button>
+      </div>
+      <div class="live-status">
+        <span class="live-dot" title="polls /api/data every 60 seconds"></span>
+        <span>live</span>
+        <span id="asOf"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="status-banner" id="statusBanner" hidden></div>
+
+  <div class="dashboard-grid">
+  <div class="ticker-bar">
+    <div class="ticker-current">
+      <div class="hero-label">current arr</div>
+      <div class="hero-number" id="heroNumber">—</div>
+      <div class="hero-updated" id="heroUpdated">last updated: —</div>
+    </div>
+
+    <div class="ticker-divider"></div>
+
+    <div class="compare-grid" id="compareGrid">
+      <div class="compare-card" data-window="1min">
+        <div class="compare-window">
+          <svg class="compare-icon" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M8 4.5V8L10.5 9.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          <span>1 minute</span>
+        </div>
+        <div class="compare-row">
+          <svg class="compare-arrow" viewBox="0 0 24 24" fill="none">
+            <path d="M12 19V5M12 5L5 12M12 5L19 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="compare-figures">
+            <div class="compare-delta">—</div>
+            <div class="compare-percent">—</div>
+            <div class="compare-caption">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="compare-card" data-window="15minavg">
+        <div class="compare-window">
+          <svg class="compare-icon" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="9" width="2.6" height="5" rx="0.6" fill="currentColor"/>
+            <rect x="6.7" y="6" width="2.6" height="8" rx="0.6" fill="currentColor"/>
+            <rect x="11.4" y="3" width="2.6" height="11" rx="0.6" fill="currentColor"/>
+          </svg>
+          <span>15-min avg</span>
+        </div>
+        <div class="compare-row">
+          <svg class="compare-arrow" viewBox="0 0 24 24" fill="none">
+            <path d="M12 19V5M12 5L5 12M12 5L19 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="compare-figures">
+            <div class="compare-delta">—</div>
+            <div class="compare-percent">—</div>
+            <div class="compare-caption">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="compare-card" data-window="1d">
+        <div class="compare-window">
+          <svg class="compare-icon" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="3" width="12" height="11" rx="2" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M2 6.5H14" stroke="currentColor" stroke-width="1.3"/>
+            <rect x="6.5" y="8.5" width="3" height="3" rx="0.6" fill="currentColor"/>
+          </svg>
+          <span>1 day</span>
+        </div>
+        <div class="compare-row">
+          <svg class="compare-arrow" viewBox="0 0 24 24" fill="none">
+            <path d="M12 19V5M12 5L5 12M12 5L19 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="compare-figures">
+            <div class="compare-delta">—</div>
+            <div class="compare-percent">—</div>
+            <div class="compare-caption">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="compare-card" data-window="7davg">
+        <div class="compare-window">
+          <svg class="compare-icon" viewBox="0 0 16 16" fill="none">
+            <rect x="1.5" y="3" width="13" height="10.5" rx="1.8" stroke="currentColor" stroke-width="1.2"/>
+            <path d="M1.5 6.2H14.5" stroke="currentColor" stroke-width="1.2"/>
+            <circle cx="4.5" cy="10" r="1" fill="currentColor"/>
+            <circle cx="8" cy="10" r="1" fill="currentColor"/>
+            <circle cx="11.5" cy="10" r="1" fill="currentColor"/>
+          </svg>
+          <span>7-day avg</span>
+        </div>
+        <div class="compare-row">
+          <svg class="compare-arrow" viewBox="0 0 24 24" fill="none">
+            <path d="M12 19V5M12 5L5 12M12 5L19 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <div class="compare-figures">
+            <div class="compare-delta">—</div>
+            <div class="compare-percent">—</div>
+            <div class="compare-caption">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-head">
+      <span class="chart-title">day by day</span>
+      <div class="chart-controls">
+        <div class="range-toggle" role="group" aria-label="date range">
+          <button class="range-btn" data-range="7">7D</button>
+          <button class="range-btn" data-range="30">30D</button>
+          <button class="range-btn" data-range="90">90D</button>
+          <button class="range-btn" data-range="all" aria-pressed="true">ALL</button>
+        </div>
+        <div class="custom-range">
+          <input type="date" id="rangeStart" aria-label="custom range start" />
+          <span class="sep">–</span>
+          <input type="date" id="rangeEnd" aria-label="custom range end" />
+        </div>
+      </div>
+    </div>
+    <div class="chart-range" id="chartRange"></div>
+    <div class="chart-canvas-holder" id="chartHolder">
+      <svg id="arrSvg" viewBox="0 0 800 320" preserveAspectRatio="none"></svg>
+      <div class="chart-tooltip" id="chartTooltip" hidden>
+        <div class="tt-date" id="ttDate"></div>
+        <div class="tt-value" id="ttValue"></div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <div class="foot-note">live · fetches /api/data on load and every 60 seconds</div>
+</div>
+
+<script>
+
+  // matches lib/format.ts's formatCurrencyAbbreviated exactly: lakh/crore for INR, K/M for USD
+  let currency = "USD";
+
+  function formatCurrency(v, opts) {
+    opts = opts || {};
+    const sign = opts.signed && v > 0 ? "+" : opts.signed && v < 0 ? "−" : "";
+    const abs = Math.abs(v);
+    let out;
+    if (currency === "INR") {
+      if (abs >= 1e7) out = "₹" + (abs / 1e7).toFixed(2) + " Cr";
+      else if (abs >= 1e5) out = "₹" + (abs / 1e5).toFixed(2) + " L";
+      else out = "₹" + Math.round(abs).toLocaleString("en-IN");
+    } else {
+      if (abs >= 1e6) out = "$" + (abs / 1e6).toFixed(2) + "M";
+      else if (abs >= 1e3) out = "$" + (abs / 1e3).toFixed(2) + "K";
+      else out = "$" + Math.round(abs).toLocaleString("en-US");
+    }
+    return sign + out;
+  }
+
+  function valueOf(point) {
+    return currency === "INR" ? point.arrInr : point.arrUsd;
+  }
+
+  function formatPercent(p) {
+    if (p === null || p === undefined) return "—";
+    const sign = p > 0 ? "+" : p < 0 ? "−" : "";
+    return sign + Math.abs(p).toFixed(2) + "%";
+  }
+
+  // Fixed abbreviations instead of Intl/toLocaleString: ICU month-name data is inconsistent
+  // across environments ("Sep" vs "Sept"), which the real app works around the same way.
+  const MONTH_ABBREVIATIONS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+  function parseTs(ts) {
+    // "YYYY-MM-DD HH:mm" or "YYYY-MM-DD" -> Date (treated as naive local time)
+    return new Date(ts.length > 10 ? ts.replace(" ", "T") : ts + "T00:00:00");
+  }
+
+  function formatDateLabel(dateStr) {
+    const d = parseTs(dateStr);
+    return d.getDate() + " " + MONTH_ABBREVIATIONS[d.getMonth()] + " " + d.getFullYear();
+  }
+
+  function formatTimeLabel(ts) {
+    const d = parseTs(ts);
+    const hour24 = d.getHours();
+    const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+    const minute = String(d.getMinutes()).padStart(2, "0");
+    const suffix = hour24 < 12 ? "am" : "pm";
+    return d.getDate() + " " + MONTH_ABBREVIATIONS[d.getMonth()] + ", " + hour12 + ":" + minute + suffix;
+  }
+
+  // matches the real app's formatDateTime exactly: "D MMM YYYY, HH:MM" (24-hour)
+  function formatDateTimeLabel(ts) {
+    const d = parseTs(ts);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return d.getDate() + " " + MONTH_ABBREVIATIONS[d.getMonth()] + " " + d.getFullYear() + ", " + hh + ":" + mm;
+  }
+
+  // --- live data: fetches the real /api/data endpoint on load and every 60s after ---
+  // Per-gateway point-in-time blend: at any exact instant, sums each gateway's latest intraday
+  // bucket at-or-before that instant, falling back to that gateway's flat Sheet 1 daily total when
+  // it has no intraday bucket yet. This is what "1 minute ago" and "trailing 15-min average" need —
+  // a real timestamp lookup, not a fixed 10-minute slot grid (which would misrepresent a gateway's
+  // value between its actual updates as a jump to its flat daily total instead of holding steady).
+  function gatewaysForDate(dailyRows, intradayRows, date) {
+    const set = new Set();
+    for (const r of dailyRows) if (r.date === date) set.add(r.gateway);
+    for (const r of intradayRows) if (r.date === date) set.add(r.gateway);
+    return set;
+  }
+
+  function blendedArrAt(dailyRows, intradayRows, date, targetMs) {
+    const gateways = gatewaysForDate(dailyRows, intradayRows, date);
+    let arrInr = 0;
+    let arrUsd = 0;
+    for (const gateway of gateways) {
+      let best = null;
+      let bestMs = -Infinity;
+      for (const r of intradayRows) {
+        if (r.date !== date || r.gateway !== gateway) continue;
+        const t = parseTs(r.timestamp).getTime();
+        if (t <= targetMs && t > bestMs) {
+          best = r;
+          bestMs = t;
+        }
+      }
+      if (best) {
+        arrInr += best.arrInr;
+        arrUsd += best.arrUsd;
+      } else {
+        const daily = dailyRows.find((r) => r.date === date && r.gateway === gateway);
+        if (daily) {
+          arrInr += daily.arrInr;
+          arrUsd += daily.arrUsd;
+        }
+      }
+    }
+    return { arrInr, arrUsd };
+  }
+
+  function blendedAverageInWindow(dailyRows, intradayRows, date, fromMs, toMs) {
+    const timestamps = new Set();
+    for (const r of intradayRows) {
+      if (r.date !== date) continue;
+      const t = parseTs(r.timestamp).getTime();
+      if (t >= fromMs && t <= toMs) timestamps.add(r.timestamp);
+    }
+    if (timestamps.size === 0) return null;
+    const points = [...timestamps].map((ts) => blendedArrAt(dailyRows, intradayRows, date, parseTs(ts).getTime()));
+    return {
+      arrInr: points.reduce((a, p) => a + p.arrInr, 0) / points.length,
+      arrUsd: points.reduce((a, p) => a + p.arrUsd, 0) / points.length,
+    };
+  }
+
+  let dailySeries = [];
+  let rawDailyRows = [];
+  let rawIntradayRows = [];
+  let freshness = { lastUpdated: null };
+
+  function latestPoint() {
+    const last = dailySeries[dailySeries.length - 1];
+    return { timestamp: freshness.lastUpdated, arrInr: last.arrInr, arrUsd: last.arrUsd };
+  }
+
+  const WINDOWS = {
+    "1min": {
+      label: () => "vs 1 minute ago",
+      reference() {
+        const latestDate = dailySeries[dailySeries.length - 1].date;
+        if (!rawIntradayRows.some((r) => r.date === latestDate)) return null;
+        const nowMs = parseTs(latestPoint().timestamp).getTime();
+        return blendedArrAt(rawDailyRows, rawIntradayRows, latestDate, nowMs - 60 * 1000);
+      },
+    },
+    "15minavg": {
+      label: () => "vs trailing 15-min avg",
+      reference() {
+        const latestDate = dailySeries[dailySeries.length - 1].date;
+        const nowMs = parseTs(latestPoint().timestamp).getTime();
+        return blendedAverageInWindow(rawDailyRows, rawIntradayRows, latestDate, nowMs - 15 * 60 * 1000, nowMs);
+      },
+    },
+    "1d": {
+      label: (ref) => "vs " + formatDateLabel(ref.date) + ", yesterday",
+      reference() {
+        return dailySeries.length >= 2 ? dailySeries[dailySeries.length - 2] : null;
+      },
+    },
+    "7davg": {
+      label: () => "vs trailing 7-day avg",
+      reference() {
+        const trailing = dailySeries.slice(-7);
+        if (trailing.length === 0) return null;
+        return {
+          arrInr: trailing.reduce((a, d) => a + d.arrInr, 0) / trailing.length,
+          arrUsd: trailing.reduce((a, d) => a + d.arrUsd, 0) / trailing.length,
+        };
+      },
+    },
+  };
+
+  function renderHero() {
+    if (dailySeries.length === 0) return;
+    const current = valueOf(latestPoint());
+    document.getElementById("heroNumber").textContent = formatCurrency(current);
+    document.getElementById("asOf").textContent = "as of " + formatTimeLabel(latestPoint().timestamp);
+    document.getElementById("heroUpdated").textContent = "last updated: " + formatDateTimeLabel(latestPoint().timestamp);
+  }
+
+  function renderCompareGrid() {
+    if (dailySeries.length === 0) return;
+    const current = valueOf(latestPoint());
+    Object.keys(WINDOWS).forEach((key) => {
+      const card = document.querySelector('.compare-card[data-window="' + key + '"]');
+      const ref = WINDOWS[key].reference();
+      const arrow = card.querySelector(".compare-arrow");
+      const deltaEl = card.querySelector(".compare-delta");
+      const percentEl = card.querySelector(".compare-percent");
+      const captionEl = card.querySelector(".compare-caption");
+
+      if (!ref) {
+        card.className = "compare-card is-flat";
+        deltaEl.textContent = "not enough history";
+        percentEl.textContent = "";
+        captionEl.textContent = "";
+        return;
+      }
+
+      const refValue = valueOf(ref);
+      const delta = current - refValue;
+      const pct = refValue !== 0 ? (delta / refValue) * 100 : null;
+      const state = delta > 0 ? "is-positive" : delta < 0 ? "is-negative" : "is-flat";
+      card.className = "compare-card " + state;
+      arrow.style.transform = delta < 0 ? "rotate(180deg)" : "rotate(0deg)";
+      deltaEl.textContent = formatCurrency(delta, { signed: true });
+      percentEl.textContent = formatPercent(pct);
+      captionEl.textContent = WINDOWS[key].label(ref);
+    });
+  }
+
+  // --- chart: hand-drawn inline SVG (no CDN dependency) ---
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const CHART_W = 800;
+  const CHART_H = 320;
+  const PAD = { top: 16, right: 12, bottom: 28, left: 66 };
+  const PLOT_W = CHART_W - PAD.left - PAD.right;
+  const PLOT_H = CHART_H - PAD.top - PAD.bottom;
+
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS(SVG_NS, tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+
+  function formatDateShort(dateStr) {
+    const d = parseTs(dateStr);
+    return d.getDate() + " " + MONTH_ABBREVIATIONS[d.getMonth()];
+  }
+
+  let currentRangeKey = "all";
+  let customStart = null;
+  let customEnd = null;
+  const svg = document.getElementById("arrSvg");
+  const tooltipEl = document.getElementById("chartTooltip");
+  const ttDate = document.getElementById("ttDate");
+  const ttValue = document.getElementById("ttValue");
+  const rangeStartInput = document.getElementById("rangeStart");
+  const rangeEndInput = document.getElementById("rangeEnd");
+
+  function rangedSeries() {
+    if (currentRangeKey === "custom") {
+      if (!customStart || !customEnd) return dailySeries;
+      const start = customStart <= customEnd ? customStart : customEnd;
+      const end = customStart <= customEnd ? customEnd : customStart;
+      const filtered = dailySeries.filter((d) => d.date >= start && d.date <= end);
+      return filtered.length > 0 ? filtered : dailySeries;
+    }
+    if (currentRangeKey === "all") return dailySeries;
+    const n = Number(currentRangeKey);
+    return dailySeries.slice(-n);
+  }
+
+  function renderChart() {
+    if (dailySeries.length === 0) return;
+    const points = rangedSeries();
+    svg.innerHTML = "";
+    if (points.length === 0) return;
+
+    const values = points.map(valueOf);
+    const maxV = Math.max(...values, 0);
+    const yMax = maxV > 0 ? maxV * 1.08 : 1;
+
+    const xFor = (i) => (points.length === 1 ? PAD.left + PLOT_W / 2 : PAD.left + (i / (points.length - 1)) * PLOT_W);
+    const yFor = (v) => PAD.top + PLOT_H - (v / yMax) * PLOT_H;
+
+    // gridlines + y labels
+    const steps = 4;
+    for (let s = 0; s <= steps; s++) {
+      const v = (yMax / steps) * s;
+      const y = yFor(v);
+      svg.appendChild(
+        svgEl("line", { x1: PAD.left, x2: CHART_W - PAD.right, y1: y, y2: y, stroke: "var(--ink-faint)", "stroke-width": 1 }),
+      );
+      const label = svgEl("text", { x: PAD.left - 10, y: y + 4, "text-anchor": "end", "font-size": 11, fill: "var(--ink-muted)" });
+      label.textContent = formatCurrency(v);
+      svg.appendChild(label);
+    }
+
+    // x-axis labels: ~6 evenly spaced
+    const tickCount = Math.min(6, points.length);
+    for (let t = 0; t < tickCount; t++) {
+      const idx = tickCount === 1 ? 0 : Math.round((t / (tickCount - 1)) * (points.length - 1));
+      const x = xFor(idx);
+      const label = svgEl("text", { x, y: CHART_H - 8, "text-anchor": "middle", "font-size": 11, fill: "var(--ink-muted)" });
+      label.textContent = formatDateShort(points[idx].date);
+      svg.appendChild(label);
+    }
+
+    // line path
+    const d = points.map((p, i) => (i === 0 ? "M" : "L") + xFor(i) + "," + yFor(valueOf(p))).join(" ");
+    svg.appendChild(svgEl("path", { d, fill: "none", stroke: "var(--ink)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+
+    // dots
+    points.forEach((p, i) => {
+      svg.appendChild(svgEl("circle", { cx: xFor(i), cy: yFor(valueOf(p)), r: 3, fill: "var(--ink)" }));
+    });
+
+    // hover layer: crosshair + highlight dot + invisible capture rect
+    const crosshair = svgEl("line", {
+      x1: 0, x2: 0, y1: PAD.top, y2: CHART_H - PAD.bottom,
+      stroke: "var(--ink-muted)", "stroke-width": 1, "stroke-dasharray": "4 4", visibility: "hidden",
+    });
+    const highlight = svgEl("circle", { r: 5, fill: "var(--ink)", visibility: "hidden" });
+    svg.appendChild(crosshair);
+    svg.appendChild(highlight);
+
+    const hoverRect = svgEl("rect", {
+      x: PAD.left, y: PAD.top, width: PLOT_W, height: PLOT_H, fill: "transparent", style: "cursor: crosshair",
+    });
+    svg.appendChild(hoverRect);
+
+    function showAt(index) {
+      const p = points[index];
+      const x = xFor(index);
+      const y = yFor(valueOf(p));
+      crosshair.setAttribute("x1", x);
+      crosshair.setAttribute("x2", x);
+      crosshair.setAttribute("visibility", "visible");
+      highlight.setAttribute("cx", x);
+      highlight.setAttribute("cy", y);
+      highlight.setAttribute("visibility", "visible");
+
+      const rect = svg.getBoundingClientRect();
+      const pxX = (x / CHART_W) * rect.width;
+      const pxY = (y / CHART_H) * rect.height;
+      tooltipEl.hidden = false;
+      tooltipEl.style.left = Math.min(Math.max(pxX, 55), rect.width - 55) + "px";
+      tooltipEl.style.top = pxY + "px";
+      ttDate.textContent = formatDateLabel(p.date);
+      ttValue.textContent = "arr: " + formatCurrency(valueOf(p));
+    }
+
+    function hide() {
+      crosshair.setAttribute("visibility", "hidden");
+      highlight.setAttribute("visibility", "hidden");
+      tooltipEl.hidden = true;
+    }
+
+    hoverRect.addEventListener("mousemove", (evt) => {
+      const rect = svg.getBoundingClientRect();
+      const svgX = ((evt.clientX - rect.left) / rect.width) * CHART_W;
+      const frac = (svgX - PAD.left) / PLOT_W;
+      const idx = Math.round(Math.min(Math.max(frac, 0), 1) * (points.length - 1));
+      showAt(idx);
+    });
+    hoverRect.addEventListener("mouseleave", hide);
+  }
+
+  function renderChartRange() {
+    if (dailySeries.length === 0) return;
+    const points = rangedSeries();
+    document.getElementById("chartRange").textContent =
+      formatDateLabel(points[0].date) + " – " + formatDateLabel(points[points.length - 1].date) + " (" + points.length + " days)";
+    renderChart();
+  }
+
+  function renderAll() {
+    renderHero();
+    renderCompareGrid();
+    renderChartRange();
+  }
+
+  // --- wiring: registered once, works whether data has loaded yet or not ---
+  document.querySelectorAll(".currency-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.currency === currency) return;
+      currency = btn.dataset.currency;
+      document.querySelectorAll(".currency-btn").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+      renderAll();
+    });
+  });
+
+  document.querySelectorAll(".range-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      currentRangeKey = btn.dataset.range;
+      document.querySelectorAll(".range-btn").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+      renderChartRange();
+    });
+  });
+
+  function onCustomRangeChange() {
+    customStart = rangeStartInput.value || null;
+    customEnd = rangeEndInput.value || null;
+    if (!customStart || !customEnd) return;
+    currentRangeKey = "custom";
+    document.querySelectorAll(".range-btn").forEach((b) => b.setAttribute("aria-pressed", "false"));
+    renderChartRange();
+  }
+  rangeStartInput.addEventListener("change", onCustomRangeChange);
+  rangeEndInput.addEventListener("change", onCustomRangeChange);
+
+  // --- live fetch: loads /api/data now, then again every 60s ---
+  const statusEl = document.getElementById("statusBanner");
+
+  function showStatus(message, isError) {
+    statusEl.hidden = false;
+    statusEl.textContent = message;
+    statusEl.className = "status-banner" + (isError ? " is-error" : "");
+  }
+  function hideStatus() {
+    statusEl.hidden = true;
+  }
+
+  async function loadData() {
+    let body;
+    try {
+      const res = await fetch("/api/data", { cache: "no-store" });
+      body = await res.json();
+    } catch {
+      showStatus("Could not reach the server. Retrying in the background…", true);
+      return;
+    }
+    if (!body.ok) {
+      const code = body.error && body.error.code;
+      const message =
+        code === "UNAUTHORIZED"
+          ? "Not signed in — this page needs an authenticated session to read /api/data (see the note below)."
+          : (body.error && body.error.message) || "Failed to load data.";
+      showStatus(message, true);
+      return;
+    }
+
+    const wasEmpty = dailySeries.length === 0;
+    const previousCurrent = wasEmpty ? null : valueOf(latestPoint());
+
+    dailySeries = body.data.series.map((s) => ({ date: s.date, arrInr: s.arrInr, arrUsd: s.arrUsd }));
+    freshness = body.data.freshness;
+    rawDailyRows = body.data.dailyRows;
+    rawIntradayRows = body.data.intradayRows;
+
+    if (dailySeries.length === 0) {
+      showStatus("Connected, but the sheet has no rows yet.", true);
+      return;
+    }
+    hideStatus();
+
+    if (wasEmpty) {
+      rangeStartInput.min = rangeEndInput.min = dailySeries[0].date;
+      rangeStartInput.max = rangeEndInput.max = dailySeries[dailySeries.length - 1].date;
+    }
+
+    renderAll();
+
+    if (!wasEmpty) {
+      const nowCurrent = valueOf(latestPoint());
+      if (nowCurrent !== previousCurrent) {
+        const heroEl = document.getElementById("heroNumber");
+        heroEl.classList.remove("flash-up", "flash-down");
+        void heroEl.offsetWidth;
+        heroEl.classList.add(nowCurrent > previousCurrent ? "flash-up" : "flash-down");
+        setTimeout(() => heroEl.classList.remove("flash-up", "flash-down"), 900);
+      }
+    }
+  }
+
+  showStatus("Loading live data…", false);
+  loadData();
+  setInterval(loadData, 60000);
+</script>
