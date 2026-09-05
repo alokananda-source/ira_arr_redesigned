@@ -43,3 +43,21 @@ export async function POST(request: NextRequest) {
   });
   return response;
 }
+
+/**
+ * Log out. The session cookie is httpOnly so the page can't clear it itself; it has to be
+ * expired server-side. This route sits outside the middleware matcher, so logging out works
+ * even once the session has already expired.
+ */
+export async function DELETE() {
+  const response = NextResponse.json({ ok: true });
+  // Same attributes as the cookie we set on login — a mismatch would leave the original in place.
+  response.cookies.set(AUTH_COOKIE_NAME, "", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
+  return response;
+}
