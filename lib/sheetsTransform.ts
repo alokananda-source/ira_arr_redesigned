@@ -179,11 +179,16 @@ export function buildDashboardData(
   const lastDate = sortedDates[sortedDates.length - 1] as string;
 
   // Latest intraday bucket per gateway, restricted to gateways reporting for the sheet's last date.
+  // Ties (>=, not >) resolve to whichever row this scan reaches last: the backend appends a fresh
+  // replacement row before deleting the stale one it's replacing, so a read caught in that few-
+  // second window can see both rows sharing one timestamp -- the fresher one always sorts later
+  // in sheet order (appends land at the bottom), so preferring the later duplicate on a tie is
+  // exactly "trust the newer write."
   const latestIntradayByGateway = new Map<string, IntradayBucketRow>();
   for (const bucket of intradayRows) {
     if (bucket.date !== lastDate) continue;
     const existing = latestIntradayByGateway.get(bucket.gateway);
-    if (!existing || bucket.timestamp > existing.timestamp) {
+    if (!existing || bucket.timestamp >= existing.timestamp) {
       latestIntradayByGateway.set(bucket.gateway, bucket);
     }
   }
@@ -210,10 +215,16 @@ export function buildDashboardData(
   // latest same-day row outright whenever it's fresher than what the Intraday10min blend gave us,
   // rather than trying to merge the two (mixing "some gateways from a combined minute row, others
   // from their own 10-minute bucket" would double count).
+  //
+  // Ties (>=, not >) resolve to whichever row this scan reaches last, same reasoning as the
+  // intraday picker above: the backend appends a fresh replacement row for a minute before
+  // deleting the stale row it's replacing, so a read caught in that window can see two rows for
+  // the same minute with different figures. The fresh one always lands later in sheet order, so
+  // on a tie the later-scanned row is the newer write and should win.
   let latestMinuteRow: MinuteRow | null = null;
   for (const row of minuteRows) {
     if (row.date !== lastDate) continue;
-    if (!latestMinuteRow || row.timestamp > latestMinuteRow.timestamp) latestMinuteRow = row;
+    if (!latestMinuteRow || row.timestamp >= latestMinuteRow.timestamp) latestMinuteRow = row;
   }
   if (latestMinuteRow && (!latestIntradayTimestamp || latestMinuteRow.timestamp > latestIntradayTimestamp)) {
     liveTotals = latestMinuteRow;

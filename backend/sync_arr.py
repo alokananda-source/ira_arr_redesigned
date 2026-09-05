@@ -326,9 +326,14 @@ def apply_minute3gateway_active_formula():
     that already carry correct formulas from a previous run and are untouched by this run's
     upsert/trim, so respraying formula text into all ~4000+ historical rows every 60s bought
     nothing but multi-second Sheets API calls that were pushing the whole sync cycle past 60s.
-    Row 2's single-cell reseed still runs every time regardless of window size -- it's the one
-    row a trim can break (the row right after a deleted range loses its old chain reference), and
-    a single-cell write is cheap enough to not matter."""
+
+    The window's FIRST row is re-anchored to F (`=F{p_start}`), not chained off P's own prior
+    value, every single run -- not just row 2. F is always our own freshly Metabase-derived
+    number (recomputed from a local, sheet-independent ledger each run, per build_minute3gateway_
+    rows' active-subscriber comment), so re-seeding from it repeatedly means any corruption that
+    slips past dedupe_minute_rows() (a duplicate row from the second, unidentified writer feeding
+    a bad churn/resume value into the P(r)=P(r-1)-G(r-1)+H(r-1) chain) can only survive for at most
+    one window's length before self-healing, instead of poisoning the running total forever."""
     if DRY_RUN:
         return
     ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
@@ -340,14 +345,86 @@ def apply_minute3gateway_active_formula():
         return
     WINDOW = LOOKBACK_MINUTES + 15  # safety buffer over the upsert replace-window
     p_start = max(3, last_row - WINDOW + 1)
-    p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(p_start, last_row + 1)]
-    ws.update(range_name=f"P{p_start}:P{last_row}", values=p_formulas, value_input_option="USER_ENTERED")
+    ws.update(range_name=f"P{p_start}", values=[[f"=F{p_start}"]], value_input_option="USER_ENTERED")
+    if last_row > p_start:
+        p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(p_start + 1, last_row + 1)]
+        ws.update(range_name=f"P{p_start+1}:P{last_row}", values=p_formulas, value_input_option="USER_ENTERED")
     jm_start = max(2, last_row - WINDOW + 1)
     mrr_arr_formulas = [
         [f"=P{r}*I{r}", f"=J{r}*12", f"=J{r}/{FX_RATE}", f"=K{r}/{FX_RATE}"]
         for r in range(jm_start, last_row + 1)
     ]
     ws.update(range_name=f"J{jm_start}:M{last_row}", values=mrr_arr_formulas, value_input_option="USER_ENTERED")
+
+
+def dedupe_minute_rows(minute_keys, minute_rows):
+    """Removes any Minute3Gateway row sharing a timestamp key with what THIS run just wrote, but
+    whose values don't match what was actually computed -- i.e. a row injected by the persistent,
+    unidentified second writer described in ARR_MRR_logic.md (a different, conflicting 'regime' of
+    active-subscriber/ARR numbers has repeatedly shown up interleaved with our own correct rows,
+    sometimes on nearly every minute). upsert_rows()'s delete step only clears rows it saw in a
+    snapshot taken *before* it appended -- if that other writer inserts its own row for the same
+    minute in the gap between our snapshot and our delete, its row survives untouched.
+
+    This runs right after upsert_rows() settles (append+delete+sort done) and, for every key we
+    just wrote, keeps whichever physical row's numbers are closest to what we computed, deleting
+    any other row sharing that same key. Matters most as a companion to the P-column formula
+    (apply_minute3gateway_active_formula): that formula's recursive chain reads whatever churn/
+    resume values sit in the sheet, so leaving a conflicting duplicate in place would poison it."""
+    if DRY_RUN or not minute_keys:
+        return
+    ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
+    expected = dict(zip(minute_keys, minute_rows))
+    key_set = set(minute_keys)
+    col_a = ws.col_values(1)
+    candidate_rows = [i + 1 for i, v in enumerate(col_a) if i > 0 and v in key_set]
+    if not candidate_rows:
+        return
+    first_r, last_r = min(candidate_rows), max(candidate_rows)
+    block = ws.get(f"A{first_r}:I{last_r}", value_render_option="UNFORMATTED_VALUE")
+
+    by_key = {}
+    for offset, row in enumerate(block):
+        if not row:
+            continue
+        key = str(row[0])
+        if key not in key_set:
+            continue
+        by_key.setdefault(key, []).append((first_r + offset, row))
+
+    def mismatch(row, exp):
+        total = 0.0
+        for i in range(1, min(len(row), len(exp))):
+            try:
+                total += abs(float(row[i]) - float(exp[i]))
+            except (TypeError, ValueError):
+                total += 1.0
+        return total
+
+    rows_to_delete = []
+    dup_keys = []
+    for key, occurrences in by_key.items():
+        if len(occurrences) < 2:
+            continue
+        exp = expected.get(key)
+        if exp is None:
+            continue
+        occurrences.sort(key=lambda item: mismatch(item[1], exp))
+        rows_to_delete.extend(r for r, _ in occurrences[1:])  # keep the closest match only
+        dup_keys.append(key)
+
+    if not rows_to_delete:
+        return
+    ss = sheets_client()
+    requests = [
+        {"deleteDimension": {
+            "range": {"sheetId": ws.id, "dimension": "ROWS", "startIndex": r - 1, "endIndex": r}
+        }}
+        for r in sorted(set(rows_to_delete), reverse=True)
+    ]
+    ss.batch_update({"requests": requests})
+    print(f"[{datetime.now(IST).isoformat()}] deduped {len(rows_to_delete)} conflicting "
+          f"Minute3Gateway row(s) for {len(dup_keys)} key(s): {sorted(dup_keys)}")
 
 
 # ---------------------------------------------------------------------------
@@ -863,6 +940,7 @@ def main():
         active_anchor=active_anchor,
     )
     upsert_rows("Minute3Gateway", "Time (1-min)", MINUTE_HEADERS, minute_keys, minute_rows)
+    dedupe_minute_rows(minute_keys, minute_rows)
     state["minute_baseline"] = {"mrr_usd": new_mrr_usd, "arr_usd": new_arr_usd}
     state["minute_active_anchor"] = new_active_anchor
     save_state(state)
