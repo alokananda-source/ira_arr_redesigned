@@ -83,8 +83,13 @@ SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 IST = ZoneInfo("Asia/Kolkata")
 FX_RATE = 94.54  # fixed INR->USD constant, confirmed — see ARR_MRR_logic.md section 4
 
-# how many trailing minutes we (re)write on every run, to self-heal any missed tick
-LOOKBACK_MINUTES = 12
+# How many trailing minutes/buckets we (re)write on every run, to self-heal any missed tick
+# OR any row a second, unidentified writer has overwritten with fabricated data (a real,
+# unresolved issue as of this writing — see ARR_MRR_logic.md). Widened from the original 12/1
+# specifically so a stray bad write gets clawed back within one cycle instead of lingering for
+# several minutes while that other process's row sits unmatched by anything in our own lookback.
+LOOKBACK_MINUTES = 60
+INTRADAY_LOOKBACK_BUCKETS = 6  # 6 x 10-min buckets = 60 minutes, matching LOOKBACK_MINUTES
 
 INTRADAY_RETENTION_DAYS = 15
 MINUTE_RETENTION_DAYS = 3
@@ -561,13 +566,14 @@ def build_sheet1_rows(gw_state, state):
 
 
 def build_intraday10min_rows(gw_state, minute_series, distinct_payers, since=None):
-    """Builds one bucket (normal live tick) or every 10-min bucket from `since` to now
-    (backfill mode, e.g. --since 17:00 to redo today's buckets under corrected logic)."""
+    """Builds the last INTRADAY_LOOKBACK_BUCKETS buckets (normal live tick, self-healing the
+    same way Minute3Gateway does) or every 10-min bucket from `since` to now (backfill mode,
+    e.g. --since 17:00 to redo today's buckets under corrected logic)."""
     now = datetime.now(IST)
     current_bucket_start = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
     first_bucket_start = (
         since.replace(minute=(since.minute // 10) * 10, second=0, microsecond=0)
-        if since else current_bucket_start
+        if since else current_bucket_start - timedelta(minutes=10 * (INTRADAY_LOOKBACK_BUCKETS - 1))
     )
 
     per_minute = {p: {} for _, p in GATEWAYS}
