@@ -54,6 +54,15 @@ function str(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function numOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value.replace(/,/g, ""));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
 export function parseDailyRows(rows: unknown[][]): GatewayDailyRow[] {
   const parsed: GatewayDailyRow[] = [];
   for (const row of rows) {
@@ -96,15 +105,22 @@ export function parseIntradayRows(rows: unknown[][]): IntradayBucketRow[] {
 
 export function parseMinuteRows(rows: unknown[][]): MinuteRow[] {
   const parsed: MinuteRow[] = [];
+  // Active Subscribers comes from column P (index 15, "Active Subscribers (Recursive)") — the
+  // live self-referencing spreadsheet formula — never from column F (index 5). If a row's P
+  // value is missing or unparseable (e.g. a #REF!/#VALUE! string, or a row written before this
+  // column existed), carry forward the last valid P reading rather than falling back to F.
+  let lastGoodActive = 0;
   for (const row of rows) {
     const timestamp = str(row[0]);
     const date = toDateOnly(timestamp);
     if (!date) continue;
+    const activeFromP = numOrNull(row[15]);
+    if (activeFromP !== null) lastGoodActive = activeFromP;
     parsed.push({
       timestamp,
       date,
       mrrInr: num(row[9]),
-      activeSubscribers: num(row[5]),
+      activeSubscribers: lastGoodActive,
       arrInr: num(row[10]),
       mrrUsd: num(row[11]),
       arrUsd: num(row[12]),

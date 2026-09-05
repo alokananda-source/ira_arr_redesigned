@@ -50,7 +50,7 @@ async function fetchSheetValues(): Promise<{ daily: unknown[][]; intraday: unkno
       ranges: [
         `${quoteSheetTab(DAILY_SHEET_TAB)}!A2:M`,
         `${quoteSheetTab(INTRADAY_SHEET_TAB)}!A2:L`,
-        `${quoteSheetTab(MINUTE_SHEET_TAB)}!A2:M`,
+        `${quoteSheetTab(MINUTE_SHEET_TAB)}!A2:P`,
       ],
       valueRenderOption: "UNFORMATTED_VALUE",
       dateTimeRenderOption: "FORMATTED_STRING",
