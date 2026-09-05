@@ -6,22 +6,27 @@ deployed on Vercel.
 
 ## How it reads the sheet
 
-The "IRA ARR" spreadsheet has two tabs with very different shapes, and the dashboard combines them:
+The "IRA ARR" spreadsheet has three tabs with different shapes, and the dashboard combines them.
+All three are kept live by the sync script in [`backend/`](./backend) — see that folder for how the
+numbers are actually computed from production data.
 
 - **`Sheet 1`** — one row per `(Date, Payment Gateway)`, updated daily. Columns: `Date`, `Payment
   Gateway`, `MRR (Rs)`, `New MRR Added`, `MRR Churned`, `Net MRR Change (+/-)`, `Active Subscribers
   (Trailing 30d / Mandate-based)`, `Net Subscriber Change (+/-)`, `Avg MRR per Subscriber (Rs)`,
   `MRR Calculated`, `ARR`, `MRR (USD)`, `ARR (USD)`. This is the source of truth for the chart and
   day-wise table: rows are summed across gateways per date.
-- **`Intraday10min`** — 10-minute snapshot buckets, currently only reported by Razorpay (Cashfree
-  and Paytm don't have an intraday feed). Columns: `Time (10-min bucket start)`, `Payment Gateway`,
-  ..., `MRR (Rs)`, `ARR (Rs)`, `MRR (USD)`, `ARR (USD)`.
+- **`Intraday10min`** — 10-minute snapshot buckets, per gateway. Columns: `Time (10-min bucket
+  start)`, `Payment Gateway`, ..., `MRR (Rs)`, `ARR (Rs)`, `MRR (USD)`, `ARR (USD)`.
+- **`Minute3Gateway`** — 1-minute buckets, all gateways already combined (no `Payment Gateway`
+  column). This is what the sync script updates every single minute, and what makes the live figure
+  actually move minute to minute rather than only every 10 minutes.
 
-For the **live KPI row**, the app takes `Sheet 1`'s last date, then for each gateway swaps in its
-latest same-day `Intraday10min` bucket where one exists (today, that's Razorpay only) and falls back
-to the `Sheet 1` row for gateways without an intraday feed (Cashfree, Paytm). That blended total also
-becomes the last point in the chart/table series, so the most recent day is live rather than
-whatever `Sheet 1` last happened to say. "Last updated" reflects the freshest bucket actually used.
+For the **live KPI row**, the app takes `Sheet 1`'s last date, then prefers `Minute3Gateway`'s latest
+same-day row outright (already summed across every gateway) whenever it's fresher than what
+`Intraday10min` has, falling back further to `Sheet 1`'s flat daily value per gateway if neither has
+reported yet. That blended total also becomes the last point in the chart/table series, so the most
+recent day is live rather than whatever `Sheet 1` last happened to say. "Last updated" reflects the
+freshest row actually used.
 
 AOV isn't a literal column — the sheet has `Avg MRR per Subscriber (Rs)` per gateway, which can't be
 summed across gateways (it's already an average). The dashboard derives AOV correctly post-rollup as
@@ -31,10 +36,14 @@ Currency: the sheet already computes MRR/ARR in both Rs and USD per row (its own
 the INR/USD toggle just switches which columns are read — there's no separate FX conversion in this
 app.
 
-See `lib/googleSheets.ts` for the implementation (`buildDashboardData` is a pure function, exercised
-directly in `tests/googleSheets.test.ts`).
+See `lib/googleSheets.ts` and `lib/sheetsTransform.ts` for the implementation (`buildDashboardData`
+is a pure function, exercised directly in `tests/sheetsTransform.test.ts`).
 
 ## Setup
+
+This covers the dashboard app itself. It assumes the "IRA ARR" sheet is already being kept live —
+that's a separate piece, the Python sync script in [`backend/`](./backend), which has its own setup
+in [`backend/README.md`](./backend/README.md).
 
 ### 1. Create a Google service account and share the sheet with it
 

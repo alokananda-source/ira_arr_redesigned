@@ -8,3 +8,9 @@ out
 next-env.d.ts
 coverage
 .preview-data
+
+# backend/ (Python sync script) runtime artifacts
+backend/venv
+backend/__pycache__
+backend/arr_sync_state.json
+backend/sync_arr.log
