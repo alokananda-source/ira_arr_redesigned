@@ -209,6 +209,13 @@ def sheets_client():
     }
     creds = Credentials.from_service_account_info(info, scopes=SHEETS_SCOPES)
     _gc = gspread.authorize(creds)
+    # gspread sets NO timeout by default -- a slow/stuck response from Google (observed once
+    # already: two ESTABLISHED connections sitting idle, the process pinned at 0% CPU for 16+
+    # minutes) hangs forever rather than raising, and since acquire_lock() holds the run lock the
+    # whole time, every subsequent launchd tick just skips instead of retrying. (connect, read)
+    # timeout in seconds -- generous since Sheets calls can legitimately take a few seconds, but
+    # bounded so a genuinely stuck request fails fast instead of blocking every future cycle.
+    _gc.set_timeout((10, 30))
     try:
         _ss = _gc.open_by_key(SHEET_ID)
     except Exception as e:
@@ -305,7 +312,7 @@ def trim_old_rows(sheet_title, key_column, retention_days):
     print(f"trimmed {len(rows_to_delete)} rows older than {retention_days}d from {sheet_title}")
 
 
-def apply_minute3gateway_active_formula():
+def apply_minute3gateway_active_formula(ws):
     """Maintains 'Active Subscribers (Recursive)' (column P) on Minute3Gateway as a live,
     self-referencing spreadsheet formula: P2 = F2 (seed, the oldest row's python-computed
     value), and P(r) = P(r-1) - G(r-1) + H(r-1) for every row after -- i.e. previous minute's
@@ -334,16 +341,19 @@ def apply_minute3gateway_active_formula():
     against a second writer corrupting the chain; that writer -- three orphaned launchd jobs from
     an abandoned earlier automation attempt, see ARR_MRR_logic.md -- has since been found and
     stopped, and dedupe_minute_rows() now keeps any future conflicting row out of the chain before
-    it can poison anything, so that reseed no longer serves a purpose and only broke continuity.)"""
+    it can poison anything, so that reseed no longer serves a purpose and only broke continuity.)
+
+    Returns the last_row it computed, so the caller (main()) can hand that same number to
+    verify_and_backfill_formula_columns() right after instead of it re-reading column A again --
+    this function's own writes never change the row count, so the value stays valid."""
     if DRY_RUN:
-        return
-    ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
+        return None
     last_row = len(ws.col_values(1))
     if last_row < 2:
-        return
+        return last_row
     ws.update(range_name=f"P2", values=[["=F2"]], value_input_option="USER_ENTERED")
     if last_row < 3:
-        return
+        return last_row
     WINDOW = LOOKBACK_MINUTES + 15  # safety buffer over the upsert replace-window
     p_start = max(3, last_row - WINDOW + 1)
     p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(p_start, last_row + 1)]
@@ -354,9 +364,10 @@ def apply_minute3gateway_active_formula():
         for r in range(jm_start, last_row + 1)
     ]
     ws.update(range_name=f"J{jm_start}:M{last_row}", values=mrr_arr_formulas, value_input_option="USER_ENTERED")
+    return last_row
 
 
-def verify_and_backfill_formula_columns():
+def verify_and_backfill_formula_columns(ws, last_row):
     """The manual equivalent of this would be selecting P2:P<last> and J2:M<last> and hitting
     Ctrl+D (fill down) after every new row -- this is that, automated and self-checking.
 
@@ -364,22 +375,29 @@ def verify_and_backfill_formula_columns():
     speed, which covers every row filled by this script's own normal (non-backfill) operation.
     But any row outside that window that's still missing its P/J-M formula -- e.g. one written by
     a `--since` backfill reaching further back than WINDOW, or any other gap -- would otherwise go
-    unnoticed forever. This scans the ENTIRE P and J columns every run (a read, not a write, so
-    it's cheap regardless of sheet size) to confirm every filled row actually has its formula, and
-    patches any gap it finds with a single targeted write instead of a full rebuild. Always logs
-    the outcome, so 'it's been dragged down' is a verified fact each cycle, not an assumption."""
-    if DRY_RUN:
-        return
-    ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
-    last_row = len(ws.col_values(1))
-    if last_row < 3:
+    unnoticed forever. This scans the ENTIRE P and J columns every run to confirm every filled row
+    actually has its formula, and patches any gap it finds with a single targeted write instead of
+    a full rebuild. Always logs the outcome, so 'it's been dragged down' is a verified fact each
+    cycle, not an assumption.
+
+    Takes the already-open worksheet and a known-current last_row (both computed once by the
+    caller) rather than re-fetching either -- this and apply_minute3gateway_active_formula() used
+    to each independently call get_or_create_worksheet() and re-read the whole first column, and
+    this function alone used to issue two separate full-column reads (P then J); stacked on top of
+    everything else upsert_rows()/dedupe_minute_rows() already do every cycle, that redundant read
+    volume tripped Google's per-user Sheets API read-quota (429 Quota exceeded), silently dropping
+    whole cycles -- and since the dashboard reads through the very same service account, it shares
+    that same quota and can 429 too. One batch_get for both columns here, and one shared last_row
+    across the whole post-upsert pipeline, cuts this function from 3 read calls to 1."""
+    if DRY_RUN or last_row < 3:
         return
 
     def is_formula(cell_row):
         return len(cell_row) > 0 and str(cell_row[0]).startswith("=")
 
-    p_vals = ws.get(f"P3:P{last_row}", value_render_option="FORMULA")
-    j_vals = ws.get(f"J2:J{last_row}", value_render_option="FORMULA")
+    p_range, j_range = f"P3:P{last_row}", f"J2:J{last_row}"
+    batches = ws.batch_get([p_range, j_range], value_render_option="FORMULA")
+    p_vals, j_vals = batches[0], batches[1]
     p_gaps = [i + 3 for i, row in enumerate(p_vals) if not is_formula(row)]
     j_gaps = [i + 2 for i, row in enumerate(j_vals) if not is_formula(row)]
 
@@ -401,7 +419,7 @@ def verify_and_backfill_formula_columns():
           f"P gap row(s)={p_gaps} J-M gap row(s)={j_gaps}")
 
 
-def dedupe_minute_rows(minute_keys, minute_rows):
+def dedupe_minute_rows(ws, minute_keys, minute_rows):
     """Removes any Minute3Gateway row sharing a timestamp key with what THIS run just wrote, but
     whose values don't match what was actually computed -- i.e. a row injected by the persistent,
     unidentified second writer described in ARR_MRR_logic.md (a different, conflicting 'regime' of
@@ -417,7 +435,6 @@ def dedupe_minute_rows(minute_keys, minute_rows):
     resume values sit in the sheet, so leaving a conflicting duplicate in place would poison it."""
     if DRY_RUN or not minute_keys:
         return
-    ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
     expected = dict(zip(minute_keys, minute_rows))
     key_set = set(minute_keys)
     col_a = ws.col_values(1)
@@ -984,7 +1001,9 @@ def main():
         active_anchor=active_anchor,
     )
     upsert_rows("Minute3Gateway", "Time (1-min)", MINUTE_HEADERS, minute_keys, minute_rows)
-    dedupe_minute_rows(minute_keys, minute_rows)
+    if not DRY_RUN:
+        mg_ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
+        dedupe_minute_rows(mg_ws, minute_keys, minute_rows)
     state["minute_baseline"] = {"mrr_usd": new_mrr_usd, "arr_usd": new_arr_usd}
     state["minute_active_anchor"] = new_active_anchor
     save_state(state)
@@ -1000,8 +1019,10 @@ def main():
         trim_old_rows("Intraday10min", "Time (10-min bucket start)", INTRADAY_RETENTION_DAYS)
         trim_old_rows("Minute3Gateway", "Time (1-min)", MINUTE_RETENTION_DAYS)
 
-    apply_minute3gateway_active_formula()
-    verify_and_backfill_formula_columns()
+    if not DRY_RUN:
+        last_row = apply_minute3gateway_active_formula(mg_ws)
+        if last_row is not None:
+            verify_and_backfill_formula_columns(mg_ws, last_row)
 
     print(f"[{datetime.now(IST).isoformat()}] synced Sheet1={today_str} "
           f"Intraday10min={len(bucket_keys)} bucket(s) Minute3Gateway=last {len(minute_keys)} min")
