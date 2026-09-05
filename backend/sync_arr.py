@@ -302,8 +302,16 @@ def apply_minute3gateway_active_formula():
     Re-applied fresh on every run rather than written once and left alone, because upsert_rows()
     deletes/re-appends/sorts rows each cycle -- a sort relocates a row's contents but does NOT
     rewrite the row numbers inside a formula's relative references, so a formula written before
-    a sort would silently point at the wrong row after one. Rebuilding the whole column from the
-    sheet's actual current positions every time sidesteps that entirely."""
+    a sort would silently point at the wrong row after one. Rebuilding the sheet's actual current
+    positions every time sidesteps that entirely.
+
+    Only the tail (last WINDOW rows) is ever rewritten, not the whole column: rows older than
+    that already carry correct formulas from a previous run and are untouched by this run's
+    upsert/trim, so respraying formula text into all ~4000+ historical rows every 60s bought
+    nothing but multi-second Sheets API calls that were pushing the whole sync cycle past 60s.
+    Row 2's single-cell reseed still runs every time regardless of window size -- it's the one
+    row a trim can break (the row right after a deleted range loses its old chain reference), and
+    a single-cell write is cheap enough to not matter."""
     if DRY_RUN:
         return
     ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
@@ -311,14 +319,18 @@ def apply_minute3gateway_active_formula():
     if last_row < 2:
         return
     ws.update(range_name=f"P2", values=[["=F2"]], value_input_option="USER_ENTERED")
-    if last_row >= 3:
-        p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(3, last_row + 1)]
-        ws.update(range_name=f"P3:P{last_row}", values=p_formulas, value_input_option="USER_ENTERED")
+    if last_row < 3:
+        return
+    WINDOW = LOOKBACK_MINUTES + 15  # safety buffer over the upsert replace-window
+    p_start = max(3, last_row - WINDOW + 1)
+    p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(p_start, last_row + 1)]
+    ws.update(range_name=f"P{p_start}:P{last_row}", values=p_formulas, value_input_option="USER_ENTERED")
+    jm_start = max(2, last_row - WINDOW + 1)
     mrr_arr_formulas = [
         [f"=P{r}*I{r}", f"=J{r}*12", f"=J{r}/{FX_RATE}", f"=K{r}/{FX_RATE}"]
-        for r in range(2, last_row + 1)
+        for r in range(jm_start, last_row + 1)
     ]
-    ws.update(range_name=f"J2:M{last_row}", values=mrr_arr_formulas, value_input_option="USER_ENTERED")
+    ws.update(range_name=f"J{jm_start}:M{last_row}", values=mrr_arr_formulas, value_input_option="USER_ENTERED")
 
 
 # ---------------------------------------------------------------------------
