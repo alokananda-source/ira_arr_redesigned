@@ -363,14 +363,27 @@ def fetch_gateway_state():
         end, 0) as avg_mrr_per_subscriber
     from active_counts ac
     """
+    # AOV restricted to the active population's OWN payments (via Razorpay's native customer_id,
+    # present on both razorpay_subscriptions and razorpay_payments) rather than all captured
+    # razorpay_payments company-wide. Confirmed ~555 vs the old ~406 -- the old company-wide
+    # figure diluted in a lot of payment history from users no longer subscribed.
     razorpay_sql = """
+    with active_customers as (
+      select distinct entity_data->>'customer_id' as customer_id
+      from razorpay_subscriptions
+      where current_status = 'active' and entity_data->>'customer_id' is not null
+    ),
+    active_customer_payments as (
+      select (p.entity_data->>'amount')::numeric / 100.0 as amount
+      from razorpay_payments p
+      join active_customers a on p.entity_data->>'customer_id' = a.customer_id
+      where (p.entity_data->>'status') = 'captured'
+        and (p.entity_data->>'amount')::numeric > 100
+        and (p.entity_data->>'amount')::numeric <= 99900
+    )
     select
       (select count(*) from razorpay_subscriptions where current_status = 'active') as active_subscribers,
-      (select avg((entity_data->>'amount')::numeric / 100.0)
-       from razorpay_payments
-       where (entity_data->>'status') = 'captured'
-         and (entity_data->>'amount')::numeric > 100
-         and (entity_data->>'amount')::numeric <= 99900) as avg_mrr_per_subscriber
+      (select avg(amount) from active_customer_payments) as avg_mrr_per_subscriber
     """
     state = {p: {"active_subscribers": 0, "avg_mrr_per_subscriber": 0.0} for _, p in GATEWAYS}
     for r in mb_query(mandate_sql):
