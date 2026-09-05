@@ -326,14 +326,15 @@ def apply_minute3gateway_active_formula():
     that already carry correct formulas from a previous run and are untouched by this run's
     upsert/trim, so respraying formula text into all ~4000+ historical rows every 60s bought
     nothing but multi-second Sheets API calls that were pushing the whole sync cycle past 60s.
-
-    The window's FIRST row is re-anchored to F (`=F{p_start}`), not chained off P's own prior
-    value, every single run -- not just row 2. F is always our own freshly Metabase-derived
-    number (recomputed from a local, sheet-independent ledger each run, per build_minute3gateway_
-    rows' active-subscriber comment), so re-seeding from it repeatedly means any corruption that
-    slips past dedupe_minute_rows() (a duplicate row from the second, unidentified writer feeding
-    a bad churn/resume value into the P(r)=P(r-1)-G(r-1)+H(r-1) chain) can only survive for at most
-    one window's length before self-healing, instead of poisoning the running total forever."""
+    This is purely a performance bound, not a correctness boundary: row 2 is the ONE seed
+    (`P2 = F2`), and every row from 3 onward -- in this window or any earlier one written by a
+    past run -- chains to the row directly above it with no other reseed point anywhere, so the
+    formula is one continuous, unbroken drag-down from the top rather than a series of independent
+    segments. (An earlier version re-anchored each window's first row straight to F as a defense
+    against a second writer corrupting the chain; that writer -- three orphaned launchd jobs from
+    an abandoned earlier automation attempt, see ARR_MRR_logic.md -- has since been found and
+    stopped, and dedupe_minute_rows() now keeps any future conflicting row out of the chain before
+    it can poison anything, so that reseed no longer serves a purpose and only broke continuity.)"""
     if DRY_RUN:
         return
     ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
@@ -345,16 +346,59 @@ def apply_minute3gateway_active_formula():
         return
     WINDOW = LOOKBACK_MINUTES + 15  # safety buffer over the upsert replace-window
     p_start = max(3, last_row - WINDOW + 1)
-    ws.update(range_name=f"P{p_start}", values=[[f"=F{p_start}"]], value_input_option="USER_ENTERED")
-    if last_row > p_start:
-        p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(p_start + 1, last_row + 1)]
-        ws.update(range_name=f"P{p_start+1}:P{last_row}", values=p_formulas, value_input_option="USER_ENTERED")
+    p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(p_start, last_row + 1)]
+    ws.update(range_name=f"P{p_start}:P{last_row}", values=p_formulas, value_input_option="USER_ENTERED")
     jm_start = max(2, last_row - WINDOW + 1)
     mrr_arr_formulas = [
         [f"=P{r}*I{r}", f"=J{r}*12", f"=J{r}/{FX_RATE}", f"=K{r}/{FX_RATE}"]
         for r in range(jm_start, last_row + 1)
     ]
     ws.update(range_name=f"J{jm_start}:M{last_row}", values=mrr_arr_formulas, value_input_option="USER_ENTERED")
+
+
+def verify_and_backfill_formula_columns():
+    """The manual equivalent of this would be selecting P2:P<last> and J2:M<last> and hitting
+    Ctrl+D (fill down) after every new row -- this is that, automated and self-checking.
+
+    apply_minute3gateway_active_formula() only rewrites a trailing WINDOW of rows each cycle for
+    speed, which covers every row filled by this script's own normal (non-backfill) operation.
+    But any row outside that window that's still missing its P/J-M formula -- e.g. one written by
+    a `--since` backfill reaching further back than WINDOW, or any other gap -- would otherwise go
+    unnoticed forever. This scans the ENTIRE P and J columns every run (a read, not a write, so
+    it's cheap regardless of sheet size) to confirm every filled row actually has its formula, and
+    patches any gap it finds with a single targeted write instead of a full rebuild. Always logs
+    the outcome, so 'it's been dragged down' is a verified fact each cycle, not an assumption."""
+    if DRY_RUN:
+        return
+    ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
+    last_row = len(ws.col_values(1))
+    if last_row < 3:
+        return
+
+    def is_formula(cell_row):
+        return len(cell_row) > 0 and str(cell_row[0]).startswith("=")
+
+    p_vals = ws.get(f"P3:P{last_row}", value_render_option="FORMULA")
+    j_vals = ws.get(f"J2:J{last_row}", value_render_option="FORMULA")
+    p_gaps = [i + 3 for i, row in enumerate(p_vals) if not is_formula(row)]
+    j_gaps = [i + 2 for i, row in enumerate(j_vals) if not is_formula(row)]
+
+    if not p_gaps and not j_gaps:
+        print(f"[{datetime.now(IST).isoformat()}] verified: P and J-M formulas present for all "
+              f"{last_row - 1} data row(s)")
+        return
+
+    updates = []
+    for r in p_gaps:
+        updates.append({"range": f"P{r}", "values": [[f"=P{r-1}-G{r-1}+H{r-1}"]]})
+    for r in j_gaps:
+        updates.append({"range": f"J{r}", "values": [[f"=P{r}*I{r}"]]})
+        updates.append({"range": f"K{r}", "values": [[f"=J{r}*12"]]})
+        updates.append({"range": f"L{r}", "values": [[f"=J{r}/{FX_RATE}"]]})
+        updates.append({"range": f"M{r}", "values": [[f"=K{r}/{FX_RATE}"]]})
+    ws.batch_update(updates, value_input_option="USER_ENTERED")
+    print(f"[{datetime.now(IST).isoformat()}] backfilled missing formulas: "
+          f"P gap row(s)={p_gaps} J-M gap row(s)={j_gaps}")
 
 
 def dedupe_minute_rows(minute_keys, minute_rows):
@@ -957,6 +1001,7 @@ def main():
         trim_old_rows("Minute3Gateway", "Time (1-min)", MINUTE_RETENTION_DAYS)
 
     apply_minute3gateway_active_formula()
+    verify_and_backfill_formula_columns()
 
     print(f"[{datetime.now(IST).isoformat()}] synced Sheet1={today_str} "
           f"Intraday10min={len(bucket_keys)} bucket(s) Minute3Gateway=last {len(minute_keys)} min")
