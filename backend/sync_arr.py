@@ -117,7 +117,7 @@ MINUTE_HEADERS = [
     "Time (1-min)", "Payments in Minute", "New Distinct Payers", "Revenue in Minute (Rs)",
     "Cumulative Revenue Today (Rs)", "Active Subscribers (Running)", "Churned This Minute",
     "Resumed This Minute", "Avg MRR per Subscriber (Rs)", "MRR (Rs)", "ARR (Rs)",
-    "MRR (USD)", "ARR (USD)",
+    "MRR (USD)", "ARR (USD)", "Δ MRR (USD)", "Δ ARR (USD)",
 ]
 
 DRY_RUN = "--dry-run" in sys.argv
@@ -292,7 +292,8 @@ def trim_old_rows(sheet_title, key_column, retention_days):
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
-    return {"prev_day_date": None, "prev_day": {}, "today_date": None, "today_snapshot": {}}
+    return {"prev_day_date": None, "prev_day": {}, "today_date": None, "today_snapshot": {},
+            "minute_baseline": {"mrr_usd": None, "arr_usd": None}}
 
 
 def save_state(state):
@@ -634,7 +635,8 @@ def build_intraday10min_rows(gw_state, minute_series, distinct_payers, since=Non
     return keys, rows
 
 
-def build_minute3gateway_rows(gw_state, minute_series, distinct_payers, churn_by_min, resume_by_min, since=None):
+def build_minute3gateway_rows(gw_state, minute_series, distinct_payers, churn_by_min, resume_by_min,
+                               since=None, baseline_mrr_usd=None, baseline_arr_usd=None):
     now = datetime.now(IST).replace(second=0, microsecond=0)
     cutoff = since.replace(second=0, microsecond=0) if since else now - timedelta(minutes=LOOKBACK_MINUTES)
 
@@ -669,22 +671,36 @@ def build_minute3gateway_rows(gw_state, minute_series, distinct_payers, churn_by
     avg_mrr_combined = (total_mrr / active_subs_total) if active_subs_total else 0
     mrr, arr, mrr_usd, arr_usd = mrr_row_values(active_subs_total, avg_mrr_combined)
 
+    # Minute-over-minute delta, in USD, however small (down to a cent). mrr_usd/arr_usd are the
+    # same figure for every row in this batch (gw_state is fetched once per script run and applied
+    # across the whole lookback window) -- so in practice only the first row of a batch can show a
+    # nonzero delta (the transition from whatever the previous run last wrote), and the rest are a
+    # genuine, correct $0.00 because nothing in the underlying data changed between those minutes.
+    # Written this way (current - running previous) rather than hardcoded so it stays correct if
+    # per-minute variation is ever added upstream.
+    prev_mrr_usd = baseline_mrr_usd
+    prev_arr_usd = baseline_arr_usd
+
     keys, rows = [], []
     minute_cursor = cutoff.replace(second=0, microsecond=0)
     while minute_cursor <= now:
         naive = minute_cursor.replace(tzinfo=None)
         key = minute_cursor.strftime("%Y-%m-%d %H:%M")
         data = by_minute.get(naive, {"payments": 0, "revenue": 0.0, "cumulative": running_cum})
+        delta_mrr_usd = round(mrr_usd - prev_mrr_usd, 2) if prev_mrr_usd is not None else 0
+        delta_arr_usd = round(arr_usd - prev_arr_usd, 2) if prev_arr_usd is not None else 0
+        prev_mrr_usd, prev_arr_usd = mrr_usd, arr_usd
         rows.append([
             key,
             data["payments"], payers_by_minute.get(naive, 0), round(data["revenue"], 2),
             round(data["cumulative"], 2), active_subs_total,
             churn_by_min.get(naive, 0), resume_by_min.get(naive, 0),
             round(avg_mrr_combined, 2), mrr, arr, mrr_usd, arr_usd,
+            delta_mrr_usd, delta_arr_usd,
         ])
         keys.append(key)
         minute_cursor += timedelta(minutes=1)
-    return keys, rows
+    return keys, rows, mrr_usd, arr_usd
 
 
 # ---------------------------------------------------------------------------
@@ -736,11 +752,18 @@ def main():
     bucket_keys, intraday_rows = build_intraday10min_rows(gw_state, minute_series, distinct_payers, since=since)
     upsert_rows("Intraday10min", "Time (10-min bucket start)", INTRADAY_HEADERS, bucket_keys, intraday_rows)
 
-    # Minute3Gateway (last LOOKBACK_MINUTES minutes, or since `since` in backfill mode)
-    minute_keys, minute_rows = build_minute3gateway_rows(
-        gw_state, minute_series, distinct_payers, churn_by_min, resume_by_min, since=since
+    # Minute3Gateway (last LOOKBACK_MINUTES minutes, or since `since` in backfill mode).
+    # The Δ MRR/ARR (USD) columns need to know what the previous run last wrote, since gw_state
+    # (and therefore mrr_usd/arr_usd) is fixed for this whole run -- persisted across runs the
+    # same way Sheet1's day-over-day baseline is.
+    minute_baseline = state.get("minute_baseline", {})
+    minute_keys, minute_rows, new_mrr_usd, new_arr_usd = build_minute3gateway_rows(
+        gw_state, minute_series, distinct_payers, churn_by_min, resume_by_min, since=since,
+        baseline_mrr_usd=minute_baseline.get("mrr_usd"), baseline_arr_usd=minute_baseline.get("arr_usd"),
     )
     upsert_rows("Minute3Gateway", "Time (1-min)", MINUTE_HEADERS, minute_keys, minute_rows)
+    state["minute_baseline"] = {"mrr_usd": new_mrr_usd, "arr_usd": new_arr_usd}
+    save_state(state)
 
     # retention cleanup (Sheet1 daily history is kept forever, no trimming) —
     # only run near the top of the hour to limit Sheets API traffic, skip entirely in backfill mode
