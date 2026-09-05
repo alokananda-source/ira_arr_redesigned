@@ -22,6 +22,7 @@ Manual test without touching the sheet:
 See README.md in this folder for the full setup (including a macOS launchd alternative to cron).
 """
 
+import fcntl
 import json
 import os
 import ssl
@@ -95,6 +96,7 @@ INTRADAY_RETENTION_DAYS = 15
 MINUTE_RETENTION_DAYS = 3
 
 STATE_FILE = Path(__file__).parent / "arr_sync_state.json"
+LOCK_FILE = Path(__file__).parent / ".sync_arr.lock"
 
 GATEWAYS = [
     ("Cashfree", "cashfree_recurring"),
@@ -135,6 +137,21 @@ DRY_RUN = "--dry-run" in sys.argv
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def acquire_lock():
+    """Refuses to let two runs execute concurrently. launchd's StartInterval can fire a new
+    tick while a slow previous run (a manual invocation, a slow VPN/Metabase response) is still
+    writing to the sheet -- two overlapping runs interleaving their append/delete/sort/formula
+    calls is exactly what left a handful of rows without a P-column value in one earlier
+    incident. Held for the lifetime of the process; released automatically on exit."""
+    lock_fp = open(LOCK_FILE, "w")
+    try:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"[{datetime.now(IST).isoformat()}] another run is still in progress, skipping this tick")
+        sys.exit(0)
+    return lock_fp  # keep this reference alive (module-level) so the lock isn't GC'd/released early
 
 
 def parse_ts(value):
@@ -809,6 +826,9 @@ def parse_since_arg():
 
 
 def main():
+    _lock = acquire_lock()
+    run_start = datetime.now(IST)
+    print(f"[{run_start.isoformat()}] run start")
     since = parse_since_arg()
     lookback = LOOKBACK_MINUTES
     if since:
