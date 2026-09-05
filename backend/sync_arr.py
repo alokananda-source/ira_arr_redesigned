@@ -16,10 +16,10 @@ Cron entry (every 1 minute) — .env is loaded automatically, only MB_KEY needs 
     * * * * * cd "/path/to/backend" && \
         MB_KEY='...' /usr/local/bin/python3 sync_arr.py >> sync_arr.log 2>&1
 
-See README.md in this folder for the full setup (including a macOS launchd alternative to cron).
-
 Manual test without touching the sheet:
     python3 sync_arr.py --dry-run
+
+See README.md in this folder for the full setup (including a macOS launchd alternative to cron).
 """
 
 import json
@@ -122,7 +122,7 @@ MINUTE_HEADERS = [
     "Time (1-min)", "Payments in Minute", "New Distinct Payers", "Revenue in Minute (Rs)",
     "Cumulative Revenue Today (Rs)", "Active Subscribers (Running)", "Churned This Minute",
     "Resumed This Minute", "Avg MRR per Subscriber (Rs)", "MRR (Rs)", "ARR (Rs)",
-    "MRR (USD)", "ARR (USD)", "Δ MRR (USD)", "Δ ARR (USD)",
+    "MRR (USD)", "ARR (USD)", "Δ MRR (USD)", "Δ ARR (USD)", "Active Subscribers (Recursive)",
 ]
 
 DRY_RUN = "--dry-run" in sys.argv
@@ -286,6 +286,39 @@ def trim_old_rows(sheet_title, key_column, retention_days):
     ]
     ss.batch_update({"requests": requests})
     print(f"trimmed {len(rows_to_delete)} rows older than {retention_days}d from {sheet_title}")
+
+
+def apply_minute3gateway_active_formula():
+    """Maintains 'Active Subscribers (Recursive)' (column P) on Minute3Gateway as a live,
+    self-referencing spreadsheet formula: P2 = F2 (seed, the oldest row's python-computed
+    value), and P(r) = P(r-1) - G(r-1) + H(r-1) for every row after -- i.e. previous minute's
+    running total, minus that minute's churn, plus that minute's resumes. Column F itself is
+    left alone (still whatever sync_arr computed directly from Metabase each run).
+
+    MRR (Rs)/ARR (Rs)/MRR (USD)/ARR (USD) (columns J-M) are rebuilt alongside it as formulas
+    derived from P and the Avg MRR per Subscriber (Rs) column (I): MRR = P * avg, ARR = MRR*12,
+    then both divided by FX_RATE for the USD columns.
+
+    Re-applied fresh on every run rather than written once and left alone, because upsert_rows()
+    deletes/re-appends/sorts rows each cycle -- a sort relocates a row's contents but does NOT
+    rewrite the row numbers inside a formula's relative references, so a formula written before
+    a sort would silently point at the wrong row after one. Rebuilding the whole column from the
+    sheet's actual current positions every time sidesteps that entirely."""
+    if DRY_RUN:
+        return
+    ws = get_or_create_worksheet("Minute3Gateway", MINUTE_HEADERS)
+    last_row = len(ws.col_values(1))
+    if last_row < 2:
+        return
+    ws.update(range_name=f"P2", values=[["=F2"]], value_input_option="USER_ENTERED")
+    if last_row >= 3:
+        p_formulas = [[f"=P{r-1}-G{r-1}+H{r-1}"] for r in range(3, last_row + 1)]
+        ws.update(range_name=f"P3:P{last_row}", values=p_formulas, value_input_option="USER_ENTERED")
+    mrr_arr_formulas = [
+        [f"=P{r}*I{r}", f"=J{r}*12", f"=J{r}/{FX_RATE}", f"=K{r}/{FX_RATE}"]
+        for r in range(2, last_row + 1)
+    ]
+    ws.update(range_name=f"J2:M{last_row}", values=mrr_arr_formulas, value_input_option="USER_ENTERED")
 
 
 # ---------------------------------------------------------------------------
@@ -803,10 +836,17 @@ def main():
     save_state(state)
 
     # retention cleanup (Sheet1 daily history is kept forever, no trimming) —
-    # only run near the top of the hour to limit Sheets API traffic, skip entirely in backfill mode
+    # only run near the top of the hour to limit Sheets API traffic, skip entirely in backfill mode.
+    # Must happen BEFORE apply_minute3gateway_active_formula(): deleteDimension shifts rows up, and
+    # the row right after the deleted range keeps its OLD absolute reference (now pointing at a row
+    # that no longer exists), which shows as #REF! and cascades down the whole formula chain below
+    # it. Rebuilding the formula column last, from the sheet's final post-trim row positions, avoids
+    # ever leaving a stale reference behind.
     if not since and datetime.now(IST).minute == 0:
         trim_old_rows("Intraday10min", "Time (10-min bucket start)", INTRADAY_RETENTION_DAYS)
         trim_old_rows("Minute3Gateway", "Time (1-min)", MINUTE_RETENTION_DAYS)
+
+    apply_minute3gateway_active_formula()
 
     print(f"[{datetime.now(IST).isoformat()}] synced Sheet1={today_str} "
           f"Intraday10min={len(bucket_keys)} bucket(s) Minute3Gateway=last {len(minute_keys)} min")
