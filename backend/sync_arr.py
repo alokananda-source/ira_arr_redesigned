@@ -208,8 +208,12 @@ def get_or_create_worksheet(title, headers):
 
 
 def upsert_rows(sheet_title, key_column, headers, keys_to_replace, rows):
-    """Delete any existing rows whose key_column value is in keys_to_replace, append the new
-    rows, then re-sort by columns 1+2 — mirrors the original Apps Script's replace-by-key logic."""
+    """Append the new rows, THEN delete the stale ones they replace, then re-sort — append-first
+    so a concurrent reader (the dashboard polling mid-write) sees a brief moment of *duplicate*
+    rows at worst, never a moment where the current row is simply missing. The old delete-first
+    order left a real gap (rows deleted, not yet re-appended) that a same-second dashboard poll
+    could catch, making the live figure appear to regress to an older, lower value before
+    self-correcting on the next 60s poll."""
     if DRY_RUN:
         print(f"[dry-run] would upsert sheet={sheet_title} rows={len(rows)} keys={keys_to_replace}")
         return
@@ -220,7 +224,12 @@ def upsert_rows(sheet_title, key_column, headers, keys_to_replace, rows):
 
     col_values = ws.col_values(key_idx + 1)  # includes header at index 0
     keys_set = set(keys_to_replace)
+    # computed from the pre-append snapshot, so these row numbers stay valid after appending —
+    # append only adds rows at the end, never shifts anything before it
     rows_to_delete = [i + 1 for i, v in enumerate(col_values) if i > 0 and v in keys_set]
+
+    if rows:
+        ws.append_rows(rows, value_input_option="RAW")
 
     if rows_to_delete:
         ss = sheets_client()
@@ -231,9 +240,6 @@ def upsert_rows(sheet_title, key_column, headers, keys_to_replace, rows):
             for r in sorted(rows_to_delete, reverse=True)
         ]
         ss.batch_update({"requests": requests})
-
-    if rows:
-        ws.append_rows(rows, value_input_option="RAW")
 
     last_row = len(ws.col_values(1))
     if last_row > 2:
