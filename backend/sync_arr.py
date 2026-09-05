@@ -642,7 +642,7 @@ def build_intraday10min_rows(gw_state, minute_series, distinct_payers, since=Non
 
 
 def build_minute3gateway_rows(gw_state, minute_series, distinct_payers, churn_by_min, resume_by_min,
-                               since=None, baseline_mrr_usd=None, baseline_arr_usd=None):
+                               since=None, baseline_mrr_usd=None, baseline_arr_usd=None, active_anchor=None):
     now = datetime.now(IST).replace(second=0, microsecond=0)
     cutoff = since.replace(second=0, microsecond=0) if since else now - timedelta(minutes=LOOKBACK_MINUTES)
 
@@ -671,19 +671,45 @@ def build_minute3gateway_rows(gw_state, minute_series, distinct_payers, churn_by
         m = r["minute_ist"]
         payers_by_minute[m] = payers_by_minute.get(m, 0) + int(r["distinct_payers"])
 
-    active_subs_total = sum(gw_state[p]["active_subscribers"] for _, p in GATEWAYS)
-    # revenue-weighted average MRR/subscriber across gateways, for the combined columns
-    total_mrr = sum(gw_state[p]["active_subscribers"] * gw_state[p]["avg_mrr_per_subscriber"] for _, p in GATEWAYS)
-    avg_mrr_combined = (total_mrr / active_subs_total) if active_subs_total else 0
-    mrr, arr, mrr_usd, arr_usd = mrr_row_values(active_subs_total, avg_mrr_combined)
+    # AOV blend stays a live figure from gw_state, unaffected by this change -- only the
+    # active-subscriber COUNT feeding into MRR below is now derived recursively (see below).
+    live_active_total = sum(gw_state[p]["active_subscribers"] for _, p in GATEWAYS)
+    total_mrr_live = sum(gw_state[p]["active_subscribers"] * gw_state[p]["avg_mrr_per_subscriber"] for _, p in GATEWAYS)
+    avg_mrr_combined = (total_mrr_live / live_active_total) if live_active_total else 0
 
-    # Minute-over-minute delta, in USD, however small (down to a cent). mrr_usd/arr_usd are the
-    # same figure for every row in this batch (gw_state is fetched once per script run and applied
-    # across the whole lookback window) -- so in practice only the first row of a batch can show a
-    # nonzero delta (the transition from whatever the previous run last wrote), and the rest are a
-    # genuine, correct $0.00 because nothing in the underlying data changed between those minutes.
-    # Written this way (current - running previous) rather than hardcoded so it stays correct if
-    # per-minute variation is ever added upstream.
+    # Active Subscribers (Running): n = (n-1) - churned + resumed, anchored to our own
+    # last-remembered value (persisted in arr_sync_state.json) instead of a fresh live COUNT
+    # query. This makes the figure immune to the second, unidentified writer corrupting the
+    # sheet: we never read our own prior value back FROM the sheet (which could be corrupted),
+    # only from local state, so a bad row there can no longer poison our own computation the
+    # way re-deriving "current active count" from scratch every run implicitly could not have
+    # anyway, but this also removes any reliance on re-querying a count that could in principle
+    # drift; it's a pure event-driven ledger from here on. Seeded once from a live count if no
+    # anchor exists yet (first run after this change, or state lost).
+    cutoff_naive = cutoff.replace(tzinfo=None)
+    now_naive = now.replace(tzinfo=None)
+    if active_anchor and active_anchor.get("time"):
+        anchor_time = parse_ts(active_anchor["time"])
+        anchor_active = active_anchor["active"]
+    else:
+        anchor_time = cutoff_naive - timedelta(minutes=1)
+        anchor_active = live_active_total
+
+    active_series = {}
+    running_active = anchor_active
+    t = anchor_time + timedelta(minutes=1)
+    while t <= now_naive:
+        running_active += resume_by_min.get(t, 0) - churn_by_min.get(t, 0)
+        active_series[t] = running_active
+        t += timedelta(minutes=1)
+    # roll the anchor forward to the start of THIS run's window, so next run only replays the
+    # small gap since then instead of the whole history every time
+    new_anchor = {
+        "time": cutoff_naive.strftime("%Y-%m-%d %H:%M"),
+        "active": active_series.get(cutoff_naive, anchor_active),
+    }
+
+    # Minute-over-minute delta, in USD, however small (down to a cent).
     prev_mrr_usd = baseline_mrr_usd
     prev_arr_usd = baseline_arr_usd
 
@@ -693,6 +719,8 @@ def build_minute3gateway_rows(gw_state, minute_series, distinct_payers, churn_by
         naive = minute_cursor.replace(tzinfo=None)
         key = minute_cursor.strftime("%Y-%m-%d %H:%M")
         data = by_minute.get(naive, {"payments": 0, "revenue": 0.0, "cumulative": running_cum})
+        active_subs_total = active_series.get(naive, anchor_active)
+        mrr, arr, mrr_usd, arr_usd = mrr_row_values(active_subs_total, avg_mrr_combined)
         delta_mrr_usd = round(mrr_usd - prev_mrr_usd, 2) if prev_mrr_usd is not None else 0
         delta_arr_usd = round(arr_usd - prev_arr_usd, 2) if prev_arr_usd is not None else 0
         prev_mrr_usd, prev_arr_usd = mrr_usd, arr_usd
@@ -706,7 +734,7 @@ def build_minute3gateway_rows(gw_state, minute_series, distinct_payers, churn_by
         ])
         keys.append(key)
         minute_cursor += timedelta(minutes=1)
-    return keys, rows, mrr_usd, arr_usd
+    return keys, rows, mrr_usd, arr_usd, new_anchor
 
 
 # ---------------------------------------------------------------------------
@@ -763,12 +791,15 @@ def main():
     # (and therefore mrr_usd/arr_usd) is fixed for this whole run -- persisted across runs the
     # same way Sheet1's day-over-day baseline is.
     minute_baseline = state.get("minute_baseline", {})
-    minute_keys, minute_rows, new_mrr_usd, new_arr_usd = build_minute3gateway_rows(
+    active_anchor = state.get("minute_active_anchor")
+    minute_keys, minute_rows, new_mrr_usd, new_arr_usd, new_active_anchor = build_minute3gateway_rows(
         gw_state, minute_series, distinct_payers, churn_by_min, resume_by_min, since=since,
         baseline_mrr_usd=minute_baseline.get("mrr_usd"), baseline_arr_usd=minute_baseline.get("arr_usd"),
+        active_anchor=active_anchor,
     )
     upsert_rows("Minute3Gateway", "Time (1-min)", MINUTE_HEADERS, minute_keys, minute_rows)
     state["minute_baseline"] = {"mrr_usd": new_mrr_usd, "arr_usd": new_arr_usd}
+    state["minute_active_anchor"] = new_active_anchor
     save_state(state)
 
     # retention cleanup (Sheet1 daily history is kept forever, no trimming) —
