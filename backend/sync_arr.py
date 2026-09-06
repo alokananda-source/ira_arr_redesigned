@@ -1014,9 +1014,10 @@ def main():
     gw_state = fetch_gateway_state()
     minute_series = fetch_today_minute_series()
     distinct_payers = fetch_recent_distinct_payers(lookback)
-    churn_by_min, resume_by_min = fetch_minute_churn_resume(lookback)
 
-    # Sheet1 (daily)
+    # Sheet1 (daily) -- state loaded here (not after the churn/resume fetch below) specifically
+    # so the persisted active-subscriber anchor's age is known before deciding how far back to
+    # query churn/resume.
     state = load_state()
     today_str, sheet1_rows = build_sheet1_rows(gw_state, state)
     sheet1_title = resolve_sheet1_title()
@@ -1032,6 +1033,22 @@ def main():
     # same way Sheet1's day-over-day baseline is.
     minute_baseline = state.get("minute_baseline", {})
     active_anchor = state.get("minute_active_anchor")
+
+    # The active-subscriber ledger (active_series in build_minute3gateway_rows) walks forward
+    # from the anchor's timestamp to now, applying churn/resume deltas -- but fetch_minute_churn_
+    # resume() below only ever fetched a fixed LOOKBACK_MINUTES window. If the anchor is OLDER
+    # than that (e.g. after any outage longer than an hour -- a real, repeated occurrence), every
+    # churn/resume event between the anchor and (now - LOOKBACK_MINUTES) was invisible to that
+    # query and silently treated as "no change," permanently biasing the ledger by however much
+    # activity happened in the gap. Widening the churn/resume fetch to always cover from the
+    # anchor's actual age (with a small safety buffer) means no outage, however long, can cause
+    # this again -- this is a data-completeness fix, not a change to any sheet formula.
+    churn_resume_lookback = lookback
+    if active_anchor and active_anchor.get("time"):
+        anchor_age_minutes = int((datetime.now(IST) - parse_ts(active_anchor["time"]).replace(tzinfo=IST)).total_seconds() // 60) + 5
+        churn_resume_lookback = max(lookback, anchor_age_minutes)
+    churn_by_min, resume_by_min = fetch_minute_churn_resume(churn_resume_lookback)
+
     minute_keys, minute_rows, new_mrr_usd, new_arr_usd, new_active_anchor = build_minute3gateway_rows(
         gw_state, minute_series, distinct_payers, churn_by_min, resume_by_min, since=since,
         baseline_mrr_usd=minute_baseline.get("mrr_usd"), baseline_arr_usd=minute_baseline.get("arr_usd"),
