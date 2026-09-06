@@ -277,13 +277,15 @@ def upsert_rows(sheet_title, key_column, headers, keys_to_replace, rows):
 
 def trim_old_rows(sheet_title, key_column, retention_days):
     """Delete rows whose key_column timestamp/date is older than retention_days. Cheap no-op
-    when nothing qualifies; call sparingly (e.g. once an hour) to limit Sheets API traffic."""
+    when nothing qualifies; call sparingly (e.g. once an hour) to limit Sheets API traffic.
+    Returns the number of rows deleted, so a caller that depends on row 2's identity (Minute3Gate-
+    way's P-column chain) knows when it needs reseeding -- see the call site in main()."""
     if DRY_RUN:
-        return
+        return 0
     ws = get_or_create_worksheet(sheet_title, [key_column])
     headers = ws.row_values(1)
     if key_column not in headers:
-        return
+        return 0
     key_idx = headers.index(key_column)
     col_values = ws.col_values(key_idx + 1)
     cutoff = datetime.now(IST).replace(tzinfo=None) - timedelta(days=retention_days)
@@ -300,7 +302,7 @@ def trim_old_rows(sheet_title, key_column, retention_days):
             rows_to_delete.append(i + 1)
 
     if not rows_to_delete:
-        return
+        return 0
     ss = sheets_client()
     requests = [
         {"deleteDimension": {
@@ -310,6 +312,7 @@ def trim_old_rows(sheet_title, key_column, retention_days):
     ]
     ss.batch_update({"requests": requests})
     print(f"trimmed {len(rows_to_delete)} rows older than {retention_days}d from {sheet_title}")
+    return len(rows_to_delete)
 
 
 def apply_minute3gateway_active_formula(ws):
@@ -343,15 +346,24 @@ def apply_minute3gateway_active_formula(ws):
     stopped, and dedupe_minute_rows() now keeps any future conflicting row out of the chain before
     it can poison anything, so that reseed no longer serves a purpose and only broke continuity.)
 
+    P2 = F2, permanently and unconditionally, every single run. An earlier version of this
+    function stopped enforcing that (reasoning that a manual correction to the seed shouldn't get
+    silently undone) -- that reasoning was backwards: P2 is not a value anyone should ever be
+    "correcting" in the first place, per the original spec ("p2=f2", literally). Treating P/F
+    disagreement as something to fix by editing the seed just breaks the one guarantee that
+    actually matters (P2=F2, always) without addressing anything real -- drift between P and F is
+    exactly what verify_and_backfill_formula_columns()'s drift-check warning exists to surface, as
+    information for a human, not license for automated code (or an agent acting on a hunch) to
+    silently rewrite row 2's seed to chase realignment with the tail. Re-enforcing this every run
+    is what actually keeps the seed's meaning intact.
+
     Returns the last_row it computed, so the caller (main()) can hand that same number to
     verify_and_backfill_formula_columns() right after instead of it re-reading column A again --
     this function's own writes never change the row count, so the value stays valid."""
     if DRY_RUN:
         return None
     last_row = len(ws.col_values(1))
-    if last_row < 2:
-        return last_row
-    ws.update(range_name=f"P2", values=[["=F2"]], value_input_option="USER_ENTERED")
+    ws.update(range_name="P2", values=[["=F2"]], value_input_option="USER_ENTERED")
     if last_row < 3:
         return last_row
     WINDOW = LOOKBACK_MINUTES + 15  # safety buffer over the upsert replace-window
@@ -395,11 +407,35 @@ def verify_and_backfill_formula_columns(ws, last_row):
     def is_formula(cell_row):
         return len(cell_row) > 0 and str(cell_row[0]).startswith("=")
 
-    p_range, j_range = f"P3:P{last_row}", f"J2:J{last_row}"
+    # P2:P (not P3:P): apply_minute3gateway_active_formula() unconditionally sets P2="=F2" before
+    # this runs, so P2 is always already correct by the time we get here -- included in the same
+    # scan as everything else rather than special-cased.
+    p_range, j_range = f"P2:P{last_row}", f"J2:J{last_row}"
     batches = ws.batch_get([p_range, j_range], value_render_option="FORMULA")
     p_vals, j_vals = batches[0], batches[1]
-    p_gaps = [i + 3 for i, row in enumerate(p_vals) if not is_formula(row)]
+    p_gaps = [i + 2 for i, row in enumerate(p_vals) if not is_formula(row)]
     j_gaps = [i + 2 for i, row in enumerate(j_vals) if not is_formula(row)]
+
+    # Drift check: P's recursive chain only ever reacts to churn/resume (G/H) -- it has no way to
+    # notice if F itself jumps (e.g. a local-ledger state reset snapping back to a fresh Metabase
+    # count, as happened once already: F dropped ~2300 in a single minute while G/H that minute
+    # were near zero, and P just kept compounding from the old baseline forever after). This is a
+    # warning only, never an auto-fix -- the chain stays exactly what "drag the formula down" means,
+    # with a human deciding if and when a gap this size warrants a manual reseed like the one used
+    # to correct that incident (see ARR_MRR_logic.md).
+    DRIFT_ALERT_THRESHOLD = 150
+    tail = ws.get(f"F{last_row}:P{last_row}", value_render_option="UNFORMATTED_VALUE")
+    if tail and len(tail[0]) >= 11:
+        try:
+            f_val, p_val = float(tail[0][0]), float(tail[0][10])
+            if abs(p_val - f_val) > DRIFT_ALERT_THRESHOLD:
+                print(f"[{datetime.now(IST).isoformat()}] WARNING: column P (Active Subscribers "
+                      f"Recursive) has drifted from F (Active Subscribers Running) by "
+                      f"{p_val - f_val:+.0f} at row {last_row} (F={f_val:.0f} P={p_val:.0f}) -- "
+                      f"P's chain doesn't see F's own resets, this needs a manual reseed if it "
+                      f"keeps growing")
+        except (TypeError, ValueError, IndexError):
+            pass
 
     if not p_gaps and not j_gaps:
         print(f"[{datetime.now(IST).isoformat()}] verified: P and J-M formulas present for all "
@@ -408,7 +444,8 @@ def verify_and_backfill_formula_columns(ws, last_row):
 
     updates = []
     for r in p_gaps:
-        updates.append({"range": f"P{r}", "values": [[f"=P{r-1}-G{r-1}+H{r-1}"]]})
+        formula = "=F2" if r == 2 else f"=P{r-1}-G{r-1}+H{r-1}"
+        updates.append({"range": f"P{r}", "values": [[formula]]})
     for r in j_gaps:
         updates.append({"range": f"J{r}", "values": [[f"=P{r}*I{r}"]]})
         updates.append({"range": f"K{r}", "values": [[f"=J{r}*12"]]})
