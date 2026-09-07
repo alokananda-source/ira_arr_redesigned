@@ -68,8 +68,46 @@ async function fetchSheetValues(): Promise<{ daily: unknown[][]; intraday: unkno
   };
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * sync_arr.py's Minute3Gateway cycle isn't a single atomic write -- it appends new rows, deletes
+ * stale ones, sorts, then rebuilds the P/J-M formula columns, each a separate Sheets API call
+ * spanning several real seconds. A read landing in the middle of that sequence can see a state
+ * that never actually settles into any row a person would find by opening the sheet a moment
+ * later (e.g. a freshly-appended row whose formula columns haven't been rebuilt yet). Detect that
+ * by checking whether the latest minute row's own timestamp is suspiciously close to "now" --
+ * within the time it takes sync_arr.py to finish one cycle (empirically ~20-30s) -- and if so,
+ * wait past that window and re-fetch once rather than serving a snapshot that's still in flux.
+ */
+function latestMinuteTimestamp(minute: unknown[][]): Date | null {
+  const last = minute[minute.length - 1];
+  const raw = last?.[0];
+  if (typeof raw !== "string") return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(raw.trim());
+  if (!match) return null;
+  const [, y, mo, d, h, mi] = match;
+  // Minute3Gateway timestamps are IST wall-clock with no offset in the string -- construct as
+  // IST (UTC+5:30) explicitly rather than letting the server's local timezone guess.
+  return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h) - 5, Number(mi) - 30));
+}
+
+const SETTLE_WINDOW_MS = 30_000;
+const SETTLE_WAIT_MS = 5_000;
+
 export async function fetchDashboardData(): Promise<DashboardData> {
-  const { daily, intraday, minute } = await fetchSheetValues();
+  let { daily, intraday, minute } = await fetchSheetValues();
+
+  const latestTs = latestMinuteTimestamp(minute);
+  if (latestTs && Date.now() - latestTs.getTime() < SETTLE_WINDOW_MS) {
+    // Caught what looks like an in-progress sync cycle -- wait for it to finish, then re-fetch
+    // once rather than serving a possibly-unsettled snapshot.
+    await sleep(SETTLE_WAIT_MS);
+    ({ daily, intraday, minute } = await fetchSheetValues());
+  }
+
   const dailyRows = parseDailyRows(daily);
   const intradayRows = parseIntradayRows(intraday);
   const minuteRows = parseMinuteRows(minute);
