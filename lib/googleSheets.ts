@@ -68,23 +68,27 @@ async function fetchSheetValues(): Promise<{ daily: unknown[][]; intraday: unkno
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * sync_arr.py's Minute3Gateway cycle isn't a single atomic write -- it appends new rows, deletes
  * stale ones, sorts, then rebuilds the P/J-M formula columns, each a separate Sheets API call
- * spanning several real seconds. A read landing in the middle of that sequence can see a state
- * that never actually settles into any row a person would find by opening the sheet a moment
- * later (e.g. a freshly-appended row whose formula columns haven't been rebuilt yet). Detect that
- * by checking whether the latest minute row's own timestamp is suspiciously close to "now" --
- * within the time it takes sync_arr.py to finish one cycle (empirically ~20-30s) -- and if so,
- * wait past that window and re-fetch once rather than serving a snapshot that's still in flux.
+ * spanning several real seconds. A read landing in the middle of that sequence can see a row that
+ * never actually settles into anything a person would find by opening the sheet a moment later
+ * (e.g. a freshly-appended row whose formula columns haven't been rebuilt yet).
+ *
+ * A previous fix waited 5s and re-fetched once, but only when the latest row's timestamp was
+ * within 30s of "now" -- a reactive check that still races if any single cycle ever takes longer
+ * than that 30s+5s budget (a slow Sheets API response, a retry, etc.), which is exactly the
+ * "still see abrupt numbers" report that came back after that fix shipped.
+ *
+ * The permanent fix removes the race entirely instead of shrinking it: never look at a
+ * Minute3Gateway row younger than FRESHNESS_LAG_MS. sync_arr.py runs roughly every 60-90s, so a
+ * row that's a full 60s old has always been through one complete cycle by the time we read it,
+ * regardless of how long that cycle took -- there is no timing window left to race.
  */
-function latestMinuteTimestamp(minute: unknown[][]): Date | null {
-  const last = minute[minute.length - 1];
-  const raw = last?.[0];
+const FRESHNESS_LAG_MS = 60_000;
+
+function rowTimestamp(row: unknown[] | undefined): Date | null {
+  const raw = row?.[0];
   if (typeof raw !== "string") return null;
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(raw.trim());
   if (!match) return null;
@@ -94,19 +98,21 @@ function latestMinuteTimestamp(minute: unknown[][]): Date | null {
   return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h) - 5, Number(mi) - 30));
 }
 
-const SETTLE_WINDOW_MS = 30_000;
-const SETTLE_WAIT_MS = 5_000;
+/** Drops trailing minute rows younger than FRESHNESS_LAG_MS, oldest-first order assumed. */
+function trimToSettled(minute: unknown[][]): unknown[][] {
+  const cutoff = Date.now() - FRESHNESS_LAG_MS;
+  let end = minute.length;
+  while (end > 0) {
+    const ts = rowTimestamp(minute[end - 1]);
+    if (ts === null || ts.getTime() <= cutoff) break;
+    end -= 1;
+  }
+  return minute.slice(0, end);
+}
 
 export async function fetchDashboardData(): Promise<DashboardData> {
-  let { daily, intraday, minute } = await fetchSheetValues();
-
-  const latestTs = latestMinuteTimestamp(minute);
-  if (latestTs && Date.now() - latestTs.getTime() < SETTLE_WINDOW_MS) {
-    // Caught what looks like an in-progress sync cycle -- wait for it to finish, then re-fetch
-    // once rather than serving a possibly-unsettled snapshot.
-    await sleep(SETTLE_WAIT_MS);
-    ({ daily, intraday, minute } = await fetchSheetValues());
-  }
+  const { daily, intraday, minute: rawMinute } = await fetchSheetValues();
+  const minute = trimToSettled(rawMinute);
 
   const dailyRows = parseDailyRows(daily);
   const intradayRows = parseIntradayRows(intraday);
