@@ -1037,6 +1037,27 @@
     }
   });
 
+  // Browsers throttle/suspend setInterval in a backgrounded tab — Chrome clamps a background
+  // tab's timers to a much coarser floor after a few minutes, and a slept/locked machine simply
+  // stops running JS at all until it wakes. Either way, `pollTimer` silently misses ticks and the
+  // page sits showing stale data (this is the "stuck at an old timestamp until I manually
+  // refreshed" bug) — the 60s interval alone cannot self-correct that, since a throttled timer
+  // still thinks it's on schedule from its own perspective. The fix is to force a catch-up fetch
+  // the moment the tab actually becomes visible/foregrounded again, on top of (not instead of)
+  // the normal interval — same one-liner as the refresh button uses.
+  async function catchUpIfVisible() {
+    if (document.visibilityState !== "visible") return;
+    await loadData();
+    schedulePoll(); // re-arm from now, so a background tick that lands right after doesn't double-fetch
+  }
+  document.addEventListener("visibilitychange", catchUpIfVisible);
+  // pageshow with event.persisted covers back/forward-cache restores (Safari/Firefox can restore
+  // a page from bfcache without a normal load or even always firing visibilitychange) — the same
+  // staleness bug, different trigger.
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) catchUpIfVisible();
+  });
+
   const logoutBtn = document.getElementById("logoutBtn");
   logoutBtn.addEventListener("click", async () => {
     if (logoutBtn.disabled) return;
