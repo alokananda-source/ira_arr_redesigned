@@ -25,44 +25,24 @@ export interface Freshness {
   isStale: boolean;
 }
 
-/** Per-gateway daily ARR, shipped to the client so it can build an intraday curve for any date it picks. */
-export interface GatewayDailyRow {
-  date: string;
-  gateway: string;
-  arrInr: number;
-  arrUsd: number;
-}
-
-/** Per-gateway 10-minute bucket, shipped raw for the same reason. */
-export interface IntradayGatewayRow {
-  timestamp: string; // "YYYY-MM-DD HH:mm"
-  date: string;
-  gateway: string;
-  arrInr: number;
-  arrUsd: number;
-}
-
-/** Minute3Gateway row — all gateways already combined, one per real minute. */
+/**
+ * "ARR Minute wise" row — one per real minute, already a single blended figure (no gateway
+ * breakdown; see DAILY/MINUTE_SHEET_TAB in constants.ts). Shipped to the client so the ticker
+ * can compute "vs 1 minute ago" / "vs trailing 15-min avg" without an extra fetch per tick.
+ */
 export interface MinuteRow {
   timestamp: string; // "YYYY-MM-DD HH:mm"
   date: string;
+  activeSubscribers: number;
+  aovInr: number;
+  mrrInr: number;
   arrInr: number;
   arrUsd: number;
-}
-
-export interface TimeOfDayPoint {
-  /** "HH:mm", the 10-minute bucket start. */
-  timeOfDay: string;
-  /** Null once past the latest bucket actually recorded for that date. */
-  arrInr: number | null;
-  arrUsd: number | null;
 }
 
 export interface DashboardData {
   series: DayMetrics[];
   freshness: Freshness;
-  dailyRows: GatewayDailyRow[];
-  intradayRows: IntradayGatewayRow[];
   minuteRows: MinuteRow[];
 }
 

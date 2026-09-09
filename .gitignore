@@ -14,3 +14,4 @@ backend/venv
 backend/__pycache__
 backend/arr_sync_state.json
 backend/sync_arr.log
+*.lock

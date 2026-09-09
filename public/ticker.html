@@ -638,71 +638,18 @@
   }
 
   // --- live data: fetches the real /api/data endpoint on load and every 60s after ---
-  // Per-gateway point-in-time blend: at any exact instant, sums each gateway's latest intraday
-  // bucket at-or-before that instant, falling back to that gateway's flat Sheet 1 daily total when
-  // it has no intraday bucket yet. This is what "1 minute ago" and "trailing 15-min average" need —
-  // a real timestamp lookup, not a fixed 10-minute slot grid (which would misrepresent a gateway's
-  // value between its actual updates as a jump to its flat daily total instead of holding steady).
-  function gatewaysForDate(dailyRows, intradayRows, date) {
-    const set = new Set();
-    for (const r of dailyRows) if (r.date === date) set.add(r.gateway);
-    for (const r of intradayRows) if (r.date === date) set.add(r.gateway);
-    return set;
-  }
-
-  function blendedArrAt(dailyRows, intradayRows, date, targetMs) {
-    const gateways = gatewaysForDate(dailyRows, intradayRows, date);
-    let arrInr = 0;
-    let arrUsd = 0;
-    for (const gateway of gateways) {
-      let best = null;
-      let bestMs = -Infinity;
-      for (const r of intradayRows) {
-        if (r.date !== date || r.gateway !== gateway) continue;
-        const t = parseTs(r.timestamp).getTime();
-        if (t <= targetMs && t > bestMs) {
-          best = r;
-          bestMs = t;
-        }
-      }
-      if (best) {
-        arrInr += best.arrInr;
-        arrUsd += best.arrUsd;
-      } else {
-        const daily = dailyRows.find((r) => r.date === date && r.gateway === gateway);
-        if (daily) {
-          arrInr += daily.arrInr;
-          arrUsd += daily.arrUsd;
-        }
-      }
-    }
-    return { arrInr, arrUsd };
-  }
-
-  function blendedAverageInWindow(dailyRows, intradayRows, date, fromMs, toMs) {
-    const timestamps = new Set();
-    for (const r of intradayRows) {
-      if (r.date !== date) continue;
-      const t = parseTs(r.timestamp).getTime();
-      if (t >= fromMs && t <= toMs) timestamps.add(r.timestamp);
-    }
-    if (timestamps.size === 0) return null;
-    const points = [...timestamps].map((ts) => blendedArrAt(dailyRows, intradayRows, date, parseTs(ts).getTime()));
-    return {
-      arrInr: points.reduce((a, p) => a + p.arrInr, 0) / points.length,
-      arrUsd: points.reduce((a, p) => a + p.arrUsd, 0) / points.length,
-    };
-  }
+  // As of the "ARR Daywise" / "ARR Minute wise" sheet simplification (2026-09-09), the sheet is
+  // already a single blended series — no per-gateway breakdown, no separate 10-min bucket tab —
+  // so there is nothing left to blend here. minuteRows is a direct as-of lookup / window average
+  // straight off "ARR Minute wise", which self-heals a trailing 60-minute window every sync run,
+  // so it's always present for "today" once the sync has run at all today. The old gateway-blend
+  // fallback (dailyRows/intradayRows, for when Minute3Gateway hadn't caught up yet) no longer
+  // applies — there is no coarser tab left to fall back to.
 
   let dailySeries = [];
-  let rawDailyRows = [];
-  let rawIntradayRows = [];
   let rawMinuteRows = [];
   let freshness = { lastUpdated: null };
 
-  // Minute3Gateway is already combined across gateways, one real row per minute — no blending,
-  // just a direct as-of lookup / window average. This is what actually makes "vs 1 minute ago"
-  // accurate; the old per-gateway blend below only had 10-minute resolution to work with.
   function minuteArrAt(minuteRows, date, targetMs) {
     let best = null;
     let bestMs = -Infinity;
@@ -741,12 +688,8 @@
       reference() {
         const latestDate = dailySeries[dailySeries.length - 1].date;
         const nowMs = parseTs(latestPoint().timestamp).getTime();
-        if (rawMinuteRows.some((r) => r.date === latestDate)) {
-          return minuteArrAt(rawMinuteRows, latestDate, nowMs - 60 * 1000);
-        }
-        // Minute3Gateway hasn't reported for this date yet — fall back to the coarser 10-min blend.
-        if (!rawIntradayRows.some((r) => r.date === latestDate)) return null;
-        return blendedArrAt(rawDailyRows, rawIntradayRows, latestDate, nowMs - 60 * 1000);
+        if (!rawMinuteRows.some((r) => r.date === latestDate)) return null;
+        return minuteArrAt(rawMinuteRows, latestDate, nowMs - 60 * 1000);
       },
     },
     "15minavg": {
@@ -754,10 +697,8 @@
       reference() {
         const latestDate = dailySeries[dailySeries.length - 1].date;
         const nowMs = parseTs(latestPoint().timestamp).getTime();
-        if (rawMinuteRows.some((r) => r.date === latestDate)) {
-          return minuteAverageInWindow(rawMinuteRows, latestDate, nowMs - 15 * 60 * 1000, nowMs);
-        }
-        return blendedAverageInWindow(rawDailyRows, rawIntradayRows, latestDate, nowMs - 15 * 60 * 1000, nowMs);
+        if (!rawMinuteRows.some((r) => r.date === latestDate)) return null;
+        return minuteAverageInWindow(rawMinuteRows, latestDate, nowMs - 15 * 60 * 1000, nowMs);
       },
     },
     "1d": {
@@ -1035,8 +976,6 @@
 
     dailySeries = body.data.series.map((s) => ({ date: s.date, arrInr: s.arrInr, arrUsd: s.arrUsd }));
     freshness = body.data.freshness;
-    rawDailyRows = body.data.dailyRows;
-    rawIntradayRows = body.data.intradayRows;
     rawMinuteRows = body.data.minuteRows;
 
     if (dailySeries.length === 0) {

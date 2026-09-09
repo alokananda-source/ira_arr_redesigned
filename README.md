@@ -6,38 +6,44 @@ deployed on Vercel.
 
 ## How it reads the sheet
 
-The "IRA ARR" spreadsheet has three tabs with different shapes, and the dashboard combines them.
-All three are kept live by the sync script in [`backend/`](./backend) — see that folder for how the
-numbers are actually computed from production data.
+**As of 2026-09-09** the "IRA ARR" spreadsheet was simplified to two tabs, both kept live by
+[`backend/sync_arr_simplified.py`](./backend/sync_arr_simplified.py) — see that script and
+`arr_recalculated/ARR_RECALCULATED_LOGIC.md` (Rumik_on root) for exactly how the numbers are
+computed (a `subscriptions`-table reconstruction, deliberately simpler than — and not identical
+to — the original mandate/payment-based `sync_arr.py`, which this replaces going forward). Both
+tabs share one flat column shape:
 
-- **`Sheet 1`** — one row per `(Date, Payment Gateway)`, updated daily. Columns: `Date`, `Payment
-  Gateway`, `MRR (Rs)`, `New MRR Added`, `MRR Churned`, `Net MRR Change (+/-)`, `Active Subscribers
-  (Trailing 30d / Mandate-based)`, `Net Subscriber Change (+/-)`, `Avg MRR per Subscriber (Rs)`,
-  `MRR Calculated`, `ARR`, `MRR (USD)`, `ARR (USD)`. This is the source of truth for the chart and
-  day-wise table: rows are summed across gateways per date.
-- **`Intraday10min`** — 10-minute snapshot buckets, per gateway. Columns: `Time (10-min bucket
-  start)`, `Payment Gateway`, ..., `MRR (Rs)`, `ARR (Rs)`, `MRR (USD)`, `ARR (USD)`.
-- **`Minute3Gateway`** — 1-minute buckets, all gateways already combined (no `Payment Gateway`
-  column). This is what the sync script updates every single minute, and what makes the live figure
-  actually move minute to minute rather than only every 10 minutes.
+- **`ARR Daywise`** — one row per date. Columns: `Date`, `Active Subscribers`, `AOV`, `MRR`, `ARR`,
+  `ARR usd`. Source of truth for the chart and day-wise table.
+- **`ARR Minute wise`** — one row per real minute. Same columns, keyed by `Minute (IST)` instead
+  of `Date`. This is what makes the live figure move minute to minute rather than only once a day.
 
-For the **live KPI row**, the app takes `Sheet 1`'s last date, then prefers `Minute3Gateway`'s latest
-same-day row outright (already summed across every gateway) whenever it's fresher than what
-`Intraday10min` has, falling back further to `Sheet 1`'s flat daily value per gateway if neither has
-reported yet. That blended total also becomes the last point in the chart/table series, so the most
-recent day is live rather than whatever `Sheet 1` last happened to say. "Last updated" reflects the
-freshest row actually used.
+For the **live KPI row**, the app takes `ARR Daywise`'s last date, then prefers `ARR Minute wise`'s
+latest same-day row whenever one exists — that tab self-heals a trailing 60-minute window every
+sync run, so it's present for "today" as soon as the sync has run at all that day. That row also
+becomes the last point in the chart/table series, so the most recent day is live rather than
+whatever `ARR Daywise` last happened to say. "Last updated" reflects the freshest row actually used.
 
-AOV isn't a literal column — the sheet has `Avg MRR per Subscriber (Rs)` per gateway, which can't be
-summed across gateways (it's already an average). The dashboard derives AOV correctly post-rollup as
-`total MRR / total active subscribers` for each day.
+AOV, MRR, and ARR are all literal sheet columns now (no per-gateway rollup to derive them from).
+`MRR (USD)` and `AOV (USD)` aren't sheet columns though — the app derives them from `ARR usd`
+(`mrrUsd = arrUsd / 12`, `aovUsd = mrrUsd / activeSubscribers`) using the same fixed FX rate
+(94.54) the sheet itself was computed with.
 
-Currency: the sheet already computes MRR/ARR in both Rs and USD per row (its own embedded rate), so
-the INR/USD toggle just switches which columns are read — there's no separate FX conversion in this
-app.
+Dates are written `DD/MM/YYYY` (and `DD/MM/YYYY HH:mm` for the minute tab) — `sheetsTransform.ts`
+converts to ISO (`YYYY-MM-DD`) on read; everything else in the app works in ISO internally.
 
 See `lib/googleSheets.ts` and `lib/sheetsTransform.ts` for the implementation (`buildDashboardData`
 is a pure function, exercised directly in `tests/sheetsTransform.test.ts`).
+
+### Migrating from the old three-tab sheet
+
+The previous version of this dashboard read `Sheet 1` / `Intraday10min` / `Minute3Gateway`,
+written by `backend/sync_arr.py` (per-gateway, mandate/payment-based numbers — still present in
+`backend/` and still fully working standalone, just no longer what this app reads by default).
+That automation is currently **paused** (see the launchd job `com.rumik.arrsync`); flip
+`GOOGLE_SHEET_DAILY_TAB` / `GOOGLE_SHEET_MINUTE_TAB` back to `Sheet 1` / `Minute3Gateway` and
+restore the git history of `lib/sheetsTransform.ts` before this commit if you need to revert to
+it.
 
 ## Setup
 
