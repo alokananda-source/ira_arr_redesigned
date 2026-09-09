@@ -1,7 +1,10 @@
 // As of the 2026-09-09 sheet simplification, the source sheet has two tabs, both already a
 // single blended series (no per-gateway breakdown, no separate 10-minute bucket tab) — see
 // arr_recalculated/ARR_RECALCULATED_LOGIC.md (Rumik_on root) and backend/sync_arr_simplified.py.
-export const DAILY_SHEET_TAB = process.env.GOOGLE_SHEET_DAILY_TAB || "ARR Daywise";
+// NOTE: the live tab is actually named "ARR Daywise " (trailing space) as created in the sheet —
+// matched exactly here since gspread/Sheets API tab lookups are exact-string, not trimmed. If the
+// tab gets renamed to drop the trailing space, update this default (or set the env var) to match.
+export const DAILY_SHEET_TAB = process.env.GOOGLE_SHEET_DAILY_TAB || "ARR Daywise ";
 // 1-minute tab — the freshest source, updated every minute by sync_arr_simplified.py.
 export const MINUTE_SHEET_TAB = process.env.GOOGLE_SHEET_MINUTE_TAB || "ARR Minute wise";
 

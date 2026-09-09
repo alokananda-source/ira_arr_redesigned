@@ -85,7 +85,9 @@ SHEETS_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 IST = ZoneInfo("Asia/Kolkata")
 FX_RATE = 94.54  # fixed INR->USD constant, same as sync_arr.py — see ARR_MRR_logic.md
 
-DAYWISE_TAB = "ARR Daywise"
+# NOTE: the live tab is actually named "ARR Daywise " (trailing space) — matched exactly, since
+# Sheets API tab lookups are exact-string, not trimmed. Update this if the tab gets renamed.
+DAYWISE_TAB = "ARR Daywise "
 MINUTEWISE_TAB = "ARR Minute wise"
 HEADERS_DAYWISE = ["Date", "Active Subscribers", "AOV", "MRR", "ARR", "ARR usd"]
 HEADERS_MINUTEWISE = ["Minute (IST)", "Active Subscribers", "AOV", "MRR", "ARR", "ARR usd"]
@@ -95,6 +97,12 @@ HEADERS_MINUTEWISE = ["Minute (IST)", "Active Subscribers", "AOV", "MRR", "ARR",
 # instead of leaving a permanent gap. Mirrors sync_arr.py's LOOKBACK_MINUTES pattern.
 MINUTE_LOOKBACK = 60
 DAY_LOOKBACK = 3
+
+# ARR Minute wise retention: only the trailing MINUTE_RETENTION_DAYS is kept — older rows are
+# trimmed every run. This also caps how far a reconnect backfill will ever reach back: there's no
+# point querying/writing minutes we're about to delete anyway, so MAX_BACKFILL_DAYS == retention.
+MINUTE_RETENTION_DAYS = 3
+MAX_BACKFILL_DAYS = MINUTE_RETENTION_DAYS
 
 LOCK_FILE = Path(__file__).parent / ".sync_arr_simplified.lock"
 
@@ -285,13 +293,70 @@ def upsert_rows(sheet_title, headers, keys_to_replace, rows):
         ws.sort((1, "asc"), range=f"A2:{gspread.utils.rowcol_to_a1(last_row, len(headers))}")
 
 
+def parse_row_key(value, has_time):
+    """Parses this script's own written key format back into a naive (IST wall-clock) datetime:
+    'DD/MM/YYYY HH:MM' for minute rows, 'DD/MM/YYYY' for day rows. Returns None if unparseable
+    (a blank cell, a header leaking through, hand-edited junk) rather than raising -- callers
+    treat that the same as "no data yet"."""
+    try:
+        return datetime.strptime(value, "%d/%m/%Y %H:%M" if has_time else "%d/%m/%Y")
+    except (ValueError, TypeError):
+        return None
+
+
+def get_last_minute_timestamp():
+    """The true last-written minute, read straight from the sheet (not a local state file) --
+    the sheet itself is the durable record of what actually got persisted, so this is what
+    correctly reflects an outage: if this process (or the whole machine) was down, restarting
+    fresh reads exactly where the sheet's own history actually stops, no separate state to lose
+    or fall out of sync. Returns None for an empty/header-only sheet (first run)."""
+    ws = get_or_create_worksheet(MINUTEWISE_TAB, HEADERS_MINUTEWISE)
+    col = ws.col_values(1)
+    if len(col) <= 1:
+        return None
+    # scan from the end for the last parseable row, in case a stray trailing blank/junk row exists
+    for value in reversed(col[1:]):
+        ts = parse_row_key(value, has_time=True)
+        if ts is not None:
+            return ts
+    return None
+
+
+def trim_old_rows(sheet_title, retention_days, has_time, now):
+    """Deletes rows whose key is older than retention_days. Cheap no-op when nothing qualifies."""
+    if DRY_RUN:
+        return 0
+    ws = get_or_create_worksheet(sheet_title, HEADERS_MINUTEWISE if has_time else HEADERS_DAYWISE)
+    col = ws.col_values(1)
+    cutoff = now - timedelta(days=retention_days)
+    rows_to_delete = []
+    for i, value in enumerate(col):
+        if i == 0:
+            continue
+        ts = parse_row_key(value, has_time=has_time)
+        if ts is not None and ts < cutoff:
+            rows_to_delete.append(i + 1)
+    if not rows_to_delete:
+        return 0
+    ss = sheets_client()
+    requests = [
+        {"deleteDimension": {
+            "range": {"sheetId": ws.id, "dimension": "ROWS", "startIndex": r - 1, "endIndex": r}
+        }}
+        for r in sorted(rows_to_delete, reverse=True)
+    ]
+    ss.batch_update({"requests": requests})
+    print(f"trimmed {len(rows_to_delete)} row(s) older than {retention_days}d from {sheet_title}")
+    return len(rows_to_delete)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     _lock = acquire_lock()
-    run_start = datetime.now(IST)
+    run_start = datetime.now(IST).replace(tzinfo=None)
     print(f"[{run_start.isoformat()}] run start (simplified sync)")
 
     # ARR Daywise: rewrite the trailing DAY_LOOKBACK days every run (self-heals a missed tick;
@@ -303,12 +368,41 @@ def main():
     day_keys = [row[0] for row in day_rows]
     upsert_rows(DAYWISE_TAB, HEADERS_DAYWISE, day_keys, day_rows)
 
-    # ARR Minute wise: rewrite the trailing MINUTE_LOOKBACK minutes every run.
-    minute_start = (run_start - timedelta(minutes=MINUTE_LOOKBACK)).strftime("%Y-%m-%d %H:%M:00")
+    # ARR Minute wise: normally just the trailing MINUTE_LOOKBACK minutes (self-heals a missed
+    # tick or two). But if the sheet's own last row is OLDER than that -- this process (or its
+    # network/VPN/Metabase access) was down for a while and just came back -- widen the window to
+    # cover the whole gap, from the last thing actually recorded up through now, so reconnecting
+    # backfills the outage instead of leaving a permanent hole. Capped at MAX_BACKFILL_DAYS back
+    # (== retention: no point fetching/writing minutes that trim_old_rows() would delete anyway).
+    last_recorded = get_last_minute_timestamp()
+    floor = run_start - timedelta(days=MAX_BACKFILL_DAYS)
+    if last_recorded is None:
+        # first run ever / sheet was emptied: seed with just the normal lookback rather than an
+        # implicit full MAX_BACKFILL_DAYS backfill, since an empty sheet isn't necessarily an
+        # outage -- if a full historical seed is wanted, run once with --since explicitly.
+        window_start = run_start - timedelta(minutes=MINUTE_LOOKBACK)
+        print(f"[{run_start.isoformat()}] ARR Minute wise has no prior data — normal {MINUTE_LOOKBACK}m lookback")
+    else:
+        gap_minutes = (run_start - last_recorded).total_seconds() / 60
+        normal_start = run_start - timedelta(minutes=MINUTE_LOOKBACK)
+        if last_recorded < normal_start:
+            window_start = max(last_recorded + timedelta(minutes=1), floor)
+            print(f"[{run_start.isoformat()}] gap detected: last row was {gap_minutes:.0f}m ago "
+                  f"({last_recorded.isoformat()}) — backfilling from {window_start.isoformat()}")
+        else:
+            window_start = normal_start
+
+    minute_start = window_start.strftime("%Y-%m-%d %H:%M:00")
     minute_results = fetch_minutewise(minute_start, "now()")
     minute_rows = [to_row(r, is_minute=True) for r in minute_results]
     minute_keys = [row[0] for row in minute_rows]
     upsert_rows(MINUTEWISE_TAB, HEADERS_MINUTEWISE, minute_keys, minute_rows)
+
+    # Retention: trim ARR Minute wise down to the trailing MINUTE_RETENTION_DAYS. Only near the
+    # top of the hour, same as sync_arr.py's pattern, to limit Sheets API traffic -- a few minutes'
+    # slack on the retention boundary costs nothing.
+    if run_start.minute == 0:
+        trim_old_rows(MINUTEWISE_TAB, MINUTE_RETENTION_DAYS, has_time=True, now=run_start)
 
     print(f"[{datetime.now(IST).isoformat()}] synced {DAYWISE_TAB}={len(day_rows)} day(s) "
           f"{MINUTEWISE_TAB}={len(minute_rows)} minute(s)")
