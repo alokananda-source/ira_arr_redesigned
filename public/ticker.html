@@ -105,6 +105,20 @@
     .live-dot { animation: none; }
   }
 
+  /* Gentle "just refreshed" heartbeat — fires on every successful poll, whether or not the
+     number actually changed, so the ticker visibly confirms it's alive/current each cycle.
+     Deliberately a soft fading glow ring rather than an opacity flicker (a dip-and-return every
+     60s would read as blinking/glitchy over time) — and separate from .flash-up/.flash-down,
+     which layer the stronger directional color change on top only when the value moves. */
+  @keyframes refresh-glow {
+    0% { box-shadow: 0 0 0 0 rgba(63,107,63,0.28); }
+    100% { box-shadow: 0 0 0 16px rgba(63,107,63,0); }
+  }
+  .ticker-bar.pulse-refresh { animation: refresh-glow 900ms ease-out; }
+  @media (prefers-reduced-motion: reduce) {
+    .ticker-bar.pulse-refresh { animation: none; }
+  }
+
   /* ticker bar: current ARR + all three comparisons in one horizontal row */
   .ticker-bar {
     background: var(--surface);
@@ -228,6 +242,12 @@
     font-size: 10.5px;
     color: var(--ink-muted);
     font-weight: 600;
+    line-height: 1.25;
+  }
+  .compare-reference {
+    font-size: 12.5px;
+    color: var(--ink);
+    font-weight: 500;
     line-height: 1.25;
   }
   .compare-card.is-positive .compare-delta,
@@ -511,6 +531,7 @@
             <div class="compare-delta">—</div>
             <div class="compare-percent">—</div>
             <div class="compare-caption">—</div>
+            <div class="compare-reference">—</div>
           </div>
         </div>
       </div>
@@ -682,6 +703,16 @@
     return { timestamp: freshness.lastUpdated, arrInr: last.arrInr, arrUsd: last.arrUsd };
   }
 
+  /** "YYYY-MM-DD" minus one calendar day. Uses Date.UTC purely for the Y/M/D arithmetic (no
+   * time-of-day attached), matching the server-side addDaysIso() convention — safe regardless of
+   * the viewer's own browser timezone, since nothing here is a real wall-clock instant. */
+  function isoDateMinusOne(dateStr) {
+    const [y, m, d] = dateStr.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    return dt.toISOString().slice(0, 10);
+  }
+
   const WINDOWS = {
     "1min": {
       label: () => "vs 1 minute ago",
@@ -702,9 +733,26 @@
       },
     },
     "1d": {
-      label: (ref) => "vs " + formatDateLabel(ref.date) + ", yesterday",
+      // Compares "now" against yesterday at the SAME time of day, not yesterday's finished
+      // end-of-day total — comparing a still-in-progress today against a complete yesterday
+      // made every day look artificially down until ~8pm regardless of actual performance (see
+      // the 2026-09-10 investigation: Sep 10 12:18pm read as -0.8% vs Sep 9's final number, but
+      // was actually +1.92% vs Sep 9 at that SAME 12:18pm — a timing artifact, not a real trend).
+      label: (ref) => "vs " + formatDateLabel(ref.date) + ", yesterday same time",
       reference() {
-        return dailySeries.length >= 2 ? dailySeries[dailySeries.length - 2] : null;
+        if (dailySeries.length < 2) return null;
+        const latestDate = dailySeries[dailySeries.length - 1].date;
+        const yesterdayDate = isoDateMinusOne(latestDate);
+        const nowTimeOfDay = latestPoint().timestamp.slice(11, 16); // "HH:mm" off the live timestamp
+        if (rawMinuteRows.some((r) => r.date === yesterdayDate)) {
+          const targetMs = parseTs(`${yesterdayDate} ${nowTimeOfDay}`).getTime();
+          const point = minuteArrAt(rawMinuteRows, yesterdayDate, targetMs);
+          if (point) return { date: yesterdayDate, arrInr: point.arrInr, arrUsd: point.arrUsd };
+        }
+        // No minute-level history for that date (e.g. before ARR Minute wise existed, or it's
+        // aged out of the 3-day retention window) — fall back to yesterday's flat daily total
+        // rather than showing "not enough history".
+        return dailySeries.find((d) => d.date === yesterdayDate) ?? null;
       },
     },
     "7davg": {
@@ -738,12 +786,14 @@
       const deltaEl = card.querySelector(".compare-delta");
       const percentEl = card.querySelector(".compare-percent");
       const captionEl = card.querySelector(".compare-caption");
+      const referenceEl = card.querySelector(".compare-reference"); // only present on the "1d" card
 
       if (!ref) {
         card.className = "compare-card is-flat";
         deltaEl.textContent = "not enough history";
         percentEl.textContent = "";
         captionEl.textContent = "";
+        if (referenceEl) referenceEl.textContent = "";
         return;
       }
 
@@ -756,6 +806,9 @@
       deltaEl.textContent = formatCurrency(delta, { signed: true });
       percentEl.textContent = formatPercent(pct);
       captionEl.textContent = WINDOWS[key].label(ref);
+      // Small plain-text line (not another hero-sized figure) showing the actual reference value
+      // itself, not just the delta/% — e.g. "was ₹27.0Cr" for the "yesterday same time" card.
+      if (referenceEl) referenceEl.textContent = "was " + formatCurrency(refValue);
     });
   }
 
@@ -990,6 +1043,17 @@
     }
 
     renderAll();
+
+    // Gentle heartbeat: fires on every successful poll, whether or not the number moved — see
+    // the .pulse-refresh CSS comment for why this is a separate, softer effect from the
+    // directional flash below rather than folded into it.
+    const tickerBarEl = document.querySelector(".ticker-bar");
+    if (tickerBarEl) {
+      tickerBarEl.classList.remove("pulse-refresh");
+      void tickerBarEl.offsetWidth;
+      tickerBarEl.classList.add("pulse-refresh");
+      setTimeout(() => tickerBarEl.classList.remove("pulse-refresh"), 900);
+    }
 
     if (!wasEmpty) {
       const nowCurrent = valueOf(latestPoint());
